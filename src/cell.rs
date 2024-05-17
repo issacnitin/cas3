@@ -1,15 +1,21 @@
 
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum CellValue {
+    Set,
+    Unset
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     dimension_values: Vec<i32>,
-    value: bool
+    value: CellValue
 }
 
 impl Cell {
     pub fn new(len: usize) -> Self {
         Cell {
             dimension_values : vec![0; len],
-            value: false
+            value: CellValue::Unset
         }
     }
     
@@ -17,8 +23,12 @@ impl Cell {
         self.dimension_values.len()
     }
 
-    pub fn get_value(&self) -> bool {
+    pub fn get_value(&self) -> CellValue {
         return self.value;
+    }
+
+    pub fn get_dimensions(&self) -> Vec<i32> {
+        return self.dimension_values.clone();
     }
 
     pub fn get_ith_coordinate(&self, pos: usize) -> i32 {
@@ -38,15 +48,20 @@ impl Cell {
     }
 
     pub fn set(&mut self) {
-        self.value = true;
+        self.value = CellValue::Set;
     }
 
     pub fn unset(&mut self) {
-        self.value = false;
+        self.value = CellValue::Unset;
     }
 
     pub fn flip(&mut self) {
-        self.value = !self.value;
+        if self.value == CellValue::Set {
+            self.value = CellValue::Unset;
+        }
+        else {
+            self.value = CellValue::Set;
+        }
     }
 }  
 
@@ -60,7 +75,7 @@ mod tests {
     fn test_new() {
         let cell : Cell = Cell::new(10);
 
-        assert_eq!(cell.value, false);
+        assert_eq!(cell.value, CellValue::Unset);
         assert_eq!(cell.dimension_values.len(), 10);
         
         for it in cell.dimension_values.iter() {
@@ -73,19 +88,19 @@ mod tests {
         let mut cell: Cell = Cell::new(10);
 
         cell.set();
-        assert_eq!(cell.get_value(), true);
+        assert_eq!(cell.get_value(), CellValue::Set);
         
         cell.set();
-        assert_eq!(cell.get_value(), true);
+        assert_eq!(cell.get_value(), CellValue::Set);
 
         cell.unset();
-        assert_eq!(cell.get_value(), false);
+        assert_eq!(cell.get_value(), CellValue::Unset);
 
         cell.unset();
-        assert_eq!(cell.get_value(), false);
+        assert_eq!(cell.get_value(), CellValue::Unset);
 
         cell.flip();
-        assert_eq!(cell.get_value(), true);
+        assert_eq!(cell.get_value(), CellValue::Set);
     }
 
 }
