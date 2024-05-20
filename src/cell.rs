@@ -18,6 +18,11 @@ impl Cell {
             value: CellValue::Unset
         }
     }
+
+    pub fn copy(&mut self, cell: Cell) {
+        self.dimension_values = cell.get_coordinates();
+        self.value = cell.get_value();
+    }
     
     pub fn len(&self) -> usize {
         self.dimension_values.len()
@@ -27,7 +32,7 @@ impl Cell {
         return self.value;
     }
 
-    pub fn get_dimensions(&self) -> Vec<i32> {
+    pub fn get_coordinates(&self) -> Vec<i32> {
         return self.dimension_values.clone();
     }
 
