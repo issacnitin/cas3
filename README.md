@@ -1,16 +1,21 @@
-## Cellular Automata State Space Search
+## Cellular Automata State Space Search for Prime Generation
 
-<ins>Objective</ins>: To build a cellular automata state space search program, which will search through all possible rule combinations for all possible cells to generate new cell.
+Prime numbers are intriguing, they compose all other numbers. Cellular automata is a computational paradigm which has a simple set of rules, works in an N-dimensional grid with a start state, and rules being applied iteratively to every cell in parallel. The rules have input as a cell's immediate neighbours, and output as a state of the cell. For simplicity, the state can be thought of as ON or OFF.
 
-<ins>Space</ins>: Start with one cell, apply rules. If successful, the applied rules would produce prime numbers :D
+This project attempts to figure out if there is an N-dimensional cellular automata which will generate the prime number sequence. The resulting cell-cluster would combine to form all other numbers in our universe!  
 
-<ins>Cell</ins>: N-dimensional vector (N specified at compile time) + Value. Value is either Set or Unset
+This project is not computationaly feasible, and is hence a learning project. Contributions are welcome, if you think you can make it do the search faster, do ping me or send in a PR.
 
-<ins>Rule</ins>:
+
+### Space
+Start with one cell, apply rules. If successful, the applied rules would produce blocks of cells which are set, and the number of cells in such a block would be prime numbers :D
+
+### Cell
+N-dimensional vector (Co-ordinates) + Value. Value is either Set or Unset
+
+### Rule
 
 One rule specifies which neighbours to check, what check to be done and what rule should be applied.
-
-Can there be multiple rules? - RuleSet. Order of rule applicability
 
 Which neighbours to check -  This is defined by the "elements" vector, where each element has 3 values: SameCoordinate, Positive, Negative
 As expected of the naming, when this rule is checked against a cell, it'll check it's neighbours, changing ith coordinate accordingly (SameCoordinate - no change, Positive - +1, Negative - -1)
@@ -20,10 +25,14 @@ What check to be done – Is whether the specified neighbours are set or not set
 What rule should be applied – Is whether the corresponding cell should be set, unset or flipped in value. RuleResult does this.
 
 
-<ins>Dimensions</ins>:
+### Dimensions
 
 Number of dimensions of the universe is unknown. We need to generate for increasing numbers, starting at 3 (since we live in 3 dimensions)
 
 
 State space search:
-Stop the search if successive applications of rule is not producing the next prime number in sequence (2,3,5,7,11,13...)
+Stop the search if successive applications of rule is not producing the next prime number in sequence (1,2,3,5,7,11,13...)
+
+## Current status
+
+Using a Core-i5 laptop, it can generate rules upto maybe 7th dimension if you run it long enough. No, we haven't found a rule which produce prime numbers. I have a feeling it requires 137 dimensions :)

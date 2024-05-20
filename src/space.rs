@@ -1,8 +1,5 @@
-use std::collections::btree_map::Range;
-use std::iter;
-
 use crate::cell::{Cell, CellValue};
-use crate::rule::{Rule, RuleCoordinate};
+use crate::rule::{Rule, RuleCoordinate, RuleResult};
 
 #[derive(Debug)]
 #[derive(Clone)]
@@ -25,11 +22,27 @@ impl Space {
         self.rule = rule;
     }
 
-    pub fn get_rule(&self) {
-        self.rule.clone();
+    pub fn get_rule(&self) -> Rule {
+        self.rule.clone()
     }
 
-    pub fn push_cell(&mut self, cell: Cell) {
+    pub fn get_current_iteration(&self) -> usize {
+        self.current_iteration
+    }
+
+    pub fn get_cells(&self) -> Vec<Cell> {
+        self.cells.clone()
+    }
+
+    pub fn get_ith_cell_mut(&mut self, i: usize) -> &mut Cell {
+        self.cells.get_mut(i).unwrap()
+    }
+
+    pub fn set_ith_cell(&mut self, i: usize, cell: &mut Cell) {
+        self.cells[i] = cell.clone();
+    }
+
+    pub fn push_cell(&mut self, cell: &Cell) {
         let found_cell: Option<&mut Cell> = self.search_cells_mut(cell.get_coordinates());
         if found_cell == None {
             self.cells.push(cell.clone());
@@ -48,6 +61,10 @@ impl Space {
         self.cells.pop();
     }
 
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
     pub fn find_number_of_cells(&self, expectedValue: CellValue) -> usize {
         let mut count = 0;
         for cell in self.cells.to_vec() {
@@ -56,28 +73,6 @@ impl Space {
             }
         }
         count
-    }
-
-    pub fn apply_rules(&mut self, intented_iteration: usize) {
-        if intented_iteration < self.current_iteration {
-            println!("Intented iteration < self.it");
-            return;
-        }
-
-        let mut new_space : Vec<Cell> = vec![];
-
-        for cell_iterator in self.cells.clone() {
-            let new_cell: Cell = self.rule.apply_rule(&cell_iterator, self);
-            new_space.push(new_cell);
-        }
-
-        self.cells = new_space;
-
-        for cell_iterator in self.cells.clone(){
-            if cell_iterator.get_value() == CellValue::Set {
-                self.generate_surrounding_cells(cell_iterator);
-            }
-        }
     }
 
     pub fn search_cells(&self, coordinates: Vec<i32>) -> Option<&Cell> {
@@ -116,7 +111,7 @@ impl Space {
         None
     }
 
-    fn generate_surrounding_cells(&mut self, cell: Cell) {
+    pub fn generate_surrounding_cells(&mut self, cell: &Cell) {
         let mut r: Rule = Rule::new(cell.len()); // Fake rule so we can use RuleCoordiantes
 
         while r.has_next_rule() {
@@ -145,14 +140,13 @@ impl Space {
 
 mod test {
     use super::*;
-
-
+    
     #[test]
     fn test_push_cell_2d() {
         let mut space: Space = Space::new(2);
         let mut cell: Cell = Cell::new(2);
 
-        space.push_cell(cell.clone());
+        space.push_cell(&cell);
 
         assert_eq!(space.cells.len(), 9);
         assert_eq!(space.find_number_of_cells(CellValue::Unset), 9);
@@ -160,7 +154,7 @@ mod test {
         cell.set();
         assert_eq!(space.find_number_of_cells(CellValue::Unset), 9);
         
-        space.push_cell(cell);
+        space.push_cell(&cell);
         assert_eq!(space.find_number_of_cells(CellValue::Unset), 8);
         assert_eq!(space.find_number_of_cells(CellValue::Set), 1);
 
@@ -169,7 +163,7 @@ mod test {
 
         assert_eq!(space.find_number_of_cells(CellValue::Unset), 8);
         assert_eq!(space.find_number_of_cells(CellValue::Set), 1);
-        space.push_cell(cell);
+        space.push_cell(&cell);
 
 
         assert_eq!(space.find_number_of_cells(CellValue::Unset), 12);
@@ -181,7 +175,7 @@ mod test {
         let mut space: Space = Space::new(2);
 
         let cell: Cell = Cell::new(2);
-        space.push_cell(cell);
+        space.push_cell(&cell);
 
         assert_ne!(space.search_cells(vec![0,0]), None);
         assert_ne!(space.search_cells(vec![0,1]), None);
@@ -205,7 +199,7 @@ mod test {
         let mut cell: Cell = Cell::new(2);
         cell.set_ith_coordinate(0, 3);
         cell.set_ith_coordinate(1, 3);
-        space.push_cell(cell);
+        space.push_cell(&cell);
 
         assert_ne!(space.search_cells(vec![3,3]), None);
         assert_ne!(space.search_cells(vec![3,4]), None);
@@ -227,7 +221,7 @@ mod test {
         let mut space: Space = Space::new(3);
 
         let mut cell: Cell = Cell::new(3);
-        space.push_cell(cell);
+        space.push_cell(&cell);
 
         assert_ne!(space.search_cells(vec![0,0,0]), None);
         assert_ne!(space.search_cells(vec![0,0,1]), None);
@@ -249,12 +243,12 @@ mod test {
         let mut cell1 : Cell = Cell::new(2);
         cell1.set_ith_coordinate(0, 1);
 
-        space.push_cell(cell1.clone());
+        space.push_cell(&cell1);
 
         let mut cell2 : Cell = Cell::new(2);
         cell2.set_ith_coordinate(1, 2);
 
-        space.push_cell(cell2.clone());
+        space.push_cell(&cell2);
 
         let found_cell = space.search_cells(vec![1, 0]);
         assert_eq!(*found_cell.unwrap(), cell1);
@@ -272,12 +266,12 @@ mod test {
         let mut cell1 : Cell = Cell::new(2);
         cell1.set_ith_coordinate(0, 1);
 
-        space.push_cell(cell1.clone());
+        space.push_cell(&cell1);
 
         let mut cell2 : Cell = Cell::new(2);
         cell2.set_ith_coordinate(1, 2);
 
-        space.push_cell(cell2.clone());
+        space.push_cell(&cell2);
 
         let found_cell = space.search_cells(vec![2, 3]);
         assert_eq!(found_cell, None);
