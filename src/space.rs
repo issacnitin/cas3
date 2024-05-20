@@ -30,8 +30,8 @@ impl Space {
         self.current_iteration
     }
 
-    pub fn get_cells(&self) -> Vec<Cell> {
-        self.cells.clone()
+    pub fn get_cells(&self) -> &Vec<Cell> {
+        &self.cells
     }
 
     pub fn get_ith_cell_mut(&mut self, i: usize) -> &mut Cell {
