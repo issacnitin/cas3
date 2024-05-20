@@ -7,7 +7,7 @@ use crate::rule::{Rule, RuleCoordinate};
 #[derive(Debug)]
 #[derive(Clone)]
 pub struct Space {
-    current_iteration: i32,
+    current_iteration: usize,
     cells: Vec<Cell>,
     rule: Rule
 }
@@ -23,6 +23,10 @@ impl Space {
 
     pub fn set_rule(&mut self, rule: Rule) {
         self.rule = rule;
+    }
+
+    pub fn get_rule(&self) {
+        self.rule.clone();
     }
 
     pub fn push_cell(&mut self, cell: Cell) {
@@ -54,7 +58,7 @@ impl Space {
         count
     }
 
-    pub fn apply_rules(&mut self, intented_iteration: i32) {
+    pub fn apply_rules(&mut self, intented_iteration: usize) {
         if intented_iteration < self.current_iteration {
             println!("Intented iteration < self.it");
             return;

@@ -1,6 +1,6 @@
 use crate::cell::CellValue;
-use crate::Cell;
-use crate::Space;
+use crate::cell::Cell;
+use crate::space::Space;
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum RuleCoordinate {

@@ -7,25 +7,25 @@ pub enum CellValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
-    dimension_values: Vec<i32>,
+    coordinates: Vec<i32>,
     value: CellValue
 }
 
 impl Cell {
     pub fn new(len: usize) -> Self {
         Cell {
-            dimension_values : vec![0; len],
+            coordinates : vec![0; len],
             value: CellValue::Unset
         }
     }
 
     pub fn copy(&mut self, cell: Cell) {
-        self.dimension_values = cell.get_coordinates();
+        self.coordinates = cell.get_coordinates();
         self.value = cell.get_value();
     }
     
     pub fn len(&self) -> usize {
-        self.dimension_values.len()
+        self.coordinates.len()
     }
 
     pub fn get_value(&self) -> CellValue {
@@ -33,23 +33,23 @@ impl Cell {
     }
 
     pub fn get_coordinates(&self) -> Vec<i32> {
-        return self.dimension_values.clone();
+        return self.coordinates.clone();
     }
 
     pub fn get_ith_coordinate(&self, pos: usize) -> i32 {
-        if pos >= self.dimension_values.len() {
+        if pos >= self.coordinates.len() {
             panic!("Array out of bounds!");
         }
 
-        return self.dimension_values[pos];
+        return self.coordinates[pos];
     }
 
     pub fn set_ith_coordinate(&mut self, pos: usize, val: i32) {
-        if pos >= self.dimension_values.len() {
+        if pos >= self.coordinates.len() {
             panic!("Array out of bounds!");
         }
 
-        self.dimension_values[pos] = val;
+        self.coordinates[pos] = val;
     }
 
     pub fn set(&mut self) {
@@ -81,9 +81,9 @@ mod tests {
         let cell : Cell = Cell::new(10);
 
         assert_eq!(cell.value, CellValue::Unset);
-        assert_eq!(cell.dimension_values.len(), 10);
+        assert_eq!(cell.coordinates.len(), 10);
         
-        for it in cell.dimension_values.iter() {
+        for it in cell.coordinates.iter() {
             assert_eq!(*it, 0);
         }
     }

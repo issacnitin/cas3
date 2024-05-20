@@ -1,10 +1,10 @@
 mod cell;
 mod space;
 mod rule;
-use cell::Cell;
-use space::Space;
-use rule::Rule;
+mod state_explorer;
+use crate::state_explorer::StateExplorer;
 
 fn main() {
-    
-}
+    let explorer: StateExplorer = StateExplorer::new(4);
+    explorer.explore();
+}   
