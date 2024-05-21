@@ -54,7 +54,7 @@ impl StateExplorer {
                     println!("\t\tIteration {} has {} elements set out of {}", it, space.find_number_of_cells(CellValue::Set), space.len());
                     if it > max_iteration {
                         max_iteration = it;
-                        max_itr_rule = Some(space.get_rule());
+                        max_itr_rule = Some(space.get_rule().clone());
                     }
                     self.apply_rules(&mut space, it);
                     // println!("{:?}", space.get_cells());
@@ -137,14 +137,7 @@ impl StateExplorer {
             space.set_ith_cell(it.0, &mut it.1);
         }
 
-        it = 0;
-        while it < space.get_cells().len() {
-            let c: Cell = space.get_cells()[it].clone();
-            if c.get_value() == CellValue::Set {
-                space.generate_surrounding_cells(&c);
-            }
-            it += 1;
-        }
+        space.gen_next_iteration();
     }
 }
 
@@ -188,51 +181,51 @@ mod test {
         cell5.unset();
         space.push_cell(&cell5);
 
-        let mut resultant_cell = space.search_cells(vec![0, 0]);
+        let mut resultant_cell = space.search_cells(&vec![0, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
-        resultant_cell = space.search_cells(vec![0, 1]);
+        resultant_cell = space.search_cells(&vec![0, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 0]);
+        resultant_cell = space.search_cells(&vec![1, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 1]);
+        resultant_cell = space.search_cells(&vec![1, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![2, 2]);
+        resultant_cell = space.search_cells(&vec![2, 2]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
         
         explorer.apply_rules(&mut space, 1);
 
-        resultant_cell = space.search_cells(vec![0, 0]);
+        resultant_cell = space.search_cells(&vec![0, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
-        resultant_cell = space.search_cells(vec![0, 1]);
+        resultant_cell = space.search_cells(&vec![0, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 0]);
+        resultant_cell = space.search_cells(&vec![1, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 1]);
+        resultant_cell = space.search_cells(&vec![1, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
-        resultant_cell = space.search_cells(vec![2, 2]);
+        resultant_cell = space.search_cells(&vec![2, 2]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
         // 2nd iteration
         explorer.apply_rules(&mut space, 2);
-        resultant_cell = space.search_cells(vec![2,2]);
+        resultant_cell = space.search_cells(&vec![2,2]);
 
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
@@ -281,37 +274,37 @@ mod test {
         space.push_cell(&cell4);
 
 
-        let mut resultant_cell = space.search_cells(vec![0, 0]);
+        let mut resultant_cell = space.search_cells(&vec![0, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![0, 1]);
+        resultant_cell = space.search_cells(&vec![0, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 0]);
+        resultant_cell = space.search_cells(&vec![1, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
-        resultant_cell = space.search_cells(vec![1, 1]);
+        resultant_cell = space.search_cells(&vec![1, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
         explorer.apply_rules(&mut space, 1);
 
-        resultant_cell = space.search_cells(vec![0, 0]);
+        resultant_cell = space.search_cells(&vec![0, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![0, 1]);
+        resultant_cell = space.search_cells(&vec![0, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 0]);
+        resultant_cell = space.search_cells(&vec![1, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
-        resultant_cell = space.search_cells(vec![1, 1]);
+        resultant_cell = space.search_cells(&vec![1, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
@@ -357,37 +350,37 @@ mod test {
         space.push_cell(&cell4);
 
 
-        let mut resultant_cell = space.search_cells(vec![0, 0]);
+        let mut resultant_cell = space.search_cells(&vec![0, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
-        resultant_cell = space.search_cells(vec![0, 1]);
+        resultant_cell = space.search_cells(&vec![0, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 0]);
+        resultant_cell = space.search_cells(&vec![1, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 1]);
+        resultant_cell = space.search_cells(&vec![1, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
         explorer.apply_rules(&mut space, 1);
 
-        resultant_cell = space.search_cells(vec![0, 0]);
+        resultant_cell = space.search_cells(&vec![0, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Set);
 
-        resultant_cell = space.search_cells(vec![0, 1]);
+        resultant_cell = space.search_cells(&vec![0, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 0]);
+        resultant_cell = space.search_cells(&vec![1, 0]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 
-        resultant_cell = space.search_cells(vec![1, 1]);
+        resultant_cell = space.search_cells(&vec![1, 1]);
         assert_ne!(resultant_cell, None);
         assert_eq!((*resultant_cell.unwrap()).get_value(), CellValue::Unset);
 

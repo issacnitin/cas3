@@ -1,3 +1,5 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum CellValue {
@@ -20,7 +22,7 @@ impl Cell {
     }
 
     pub fn copy(&mut self, cell: Cell) {
-        self.coordinates = cell.get_coordinates();
+        self.coordinates = cell.get_coordinates().clone();
         self.value = cell.get_value();
     }
     
@@ -32,8 +34,8 @@ impl Cell {
         return self.value;
     }
 
-    pub fn get_coordinates(&self) -> Vec<i32> {
-        return self.coordinates.clone();
+    pub fn get_coordinates(&self) -> &Vec<i32> {
+        &self.coordinates
     }
 
     pub fn get_ith_coordinate(&self, pos: usize) -> i32 {
@@ -67,6 +69,12 @@ impl Cell {
         else {
             self.value = CellValue::Set;
         }
+    }
+
+    pub fn get_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.coordinates.hash(&mut hasher);
+        hasher.finish()
     }
 }  
 
