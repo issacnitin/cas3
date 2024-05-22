@@ -27,15 +27,53 @@ pub struct OpNode {
 
 // Binary Operation Tree
 impl OpNode {
-    pub fn new() -> Self {
-        OpNode {
+    pub fn new(start_index: usize, end_index: usize) -> Self {
+        let mut node = OpNode {
             operation: Op::None,
             left_child: None,
             right_child: None,
-            start_index: 0,
-            end_index: 0,
+            start_index: start_index,
+            end_index: end_index,
             split_index: 0
+        };
+        node.reset(start_index, end_index, true);
+        return node;
+    }
+
+    pub fn debug_print(&self) {
+        if !cfg!(debug_assertions) {
+            return;
         }
+
+        // Leaf node
+        if self.start_index == self.end_index {
+            if self.operation == Op::Not {
+                
+                print!("!");
+            }
+            print!("{}", self.start_index);
+            return;
+        }
+
+        // Parent node
+        print!("( ");
+
+        if self.left_child != None {
+            self.left_child.as_ref().unwrap().debug_print();
+        }
+
+        if self.operation == Op::And {
+            print!(" & ");
+        }
+        else if self.operation == Op::Or {
+            print!(" | ");
+        }
+
+        if self.right_child != None {
+            self.right_child.as_ref().unwrap().debug_print();
+        }
+
+        print!(" )");
     }
 
     pub fn len(&self) -> usize {
@@ -73,11 +111,8 @@ impl OpNode {
 
         self.operation = Op::And;
 
-        let mut left_node = OpNode::new();
-        left_node.reset(start_index, self.split_index, true);
-
-        let mut right_node: OpNode = OpNode::new();
-        right_node.reset(self.split_index+1, end_index, true);
+        let mut left_node = OpNode::new(start_index, self.split_index);
+        let mut right_node: OpNode = OpNode::new(self.split_index+1, end_index);
 
         self.left_child = Some(Box::new(left_node));
         self.right_child = Some(Box::new(right_node));
@@ -87,6 +122,10 @@ impl OpNode {
     pub fn evaluate(&self, values: &Vec<bool>) -> bool {
         if values.len() == 0 {
             panic!("Invalid input");
+        }
+        
+        if self.start_index > values.len() || self.end_index > values.len() {
+            panic!("Start Index {}, End Index {}, greater than passed in vector of length {}", self.start_index, self.end_index, values.len());
         }
 
         // Leaf node
@@ -160,11 +199,10 @@ impl OpNode {
         // Increase split index, so children are different structure wise
         self.split_index += 1;
 
-        let mut left_node = OpNode::new();
+        let mut left_node = OpNode::new(self.start_index, self.split_index);
         left_node.reset(self.start_index, self.split_index, true);
 
-        let mut right_node = OpNode::new();
-        right_node.reset(self.split_index+1, self.end_index, true);
+        let mut right_node = OpNode::new(self.split_index+1, self.end_index);
 
         self.left_child = Some(Box::new(left_node));
         self.right_child = Some(Box::new(right_node));
@@ -176,15 +214,13 @@ mod test {
 
     #[test]
     fn test_op_node_eval() {
-        let mut leaf_node = OpNode::new();
-        leaf_node.reset(0, 0, true);
+        let mut leaf_node = OpNode::new(0, 0);
 
         assert_eq!(leaf_node.evaluate(&vec![true]), true);
         leaf_node.generate_next();
         assert_eq!(leaf_node.evaluate(&vec![true]), false);
 
-        let mut two_var_node = OpNode::new();
-        two_var_node.reset(0, 1, true);
+        let mut two_var_node = OpNode::new(0, 1);
 
         // None And None
         assert_eq!(two_var_node.evaluate(&vec![true, true]), true);
@@ -248,13 +284,11 @@ mod test {
 
     #[test]
     fn test_op_node_generate() {
-        let mut leaf_node = OpNode::new();
-        leaf_node.reset(0, 0, true);
+        let mut leaf_node = OpNode::new(0, 0);
 
         test_leaf_node(&mut leaf_node, 0);
 
-        let mut and_node = OpNode::new();
-        and_node.reset(0, 1, true);
+        let mut and_node = OpNode::new(0, 1);
 
         assert_eq!(and_node.operation, Op::And);
         assert_eq!(and_node.start_index, 0);
@@ -297,8 +331,7 @@ mod test {
         assert_eq!(and_node.right_child.clone().unwrap().operation, Op::None);
         
 
-        let mut three_child_node = OpNode::new();
-        three_child_node.reset(0, 2, true);
+        let mut three_child_node = OpNode::new(0, 2);
 
         let mut counter = 1;
         while three_child_node.has_next() {

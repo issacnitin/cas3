@@ -1,7 +1,8 @@
 use crate::cell::CellValue;
 use crate::cell::Cell;
+use crate::rule::Action;
+use crate::rule::Rule;
 use crate::space::Space;
-use crate::rule::{RuleElement, RuleCoordinate, RuleResult};
 
 pub struct StateExplorer {
     min_dimensions: usize,
@@ -21,55 +22,59 @@ impl StateExplorer {
 
     pub fn explore(&self) -> bool {
         // Explore all dimensions
-        for dims in self.min_dimensions..self.max_dimensions+1 {
-            let mut r = RuleElement::new(dims);
-            r.set_expected_cell_value(CellValue::Set);
-            println!("Exploring dimension {}", dims);
+        for dim_len in self.min_dimensions..self.max_dimensions+1 {
+            println!("Exploring dimension {}", dim_len);
+            let mut rule = Rule::new(dim_len);
+            let mut rule_counter = 0;
 
-            let mut rule_count = 0;
-            let mut max_iteration = 0;
-            let mut max_itr_rule : Option<RuleElement> = None;
-            // For all possible rules
-            while r.has_next_applicable_coordinate() {
-                r = r.gen_next_applicable_coordinate();
-                rule_count +=1;
-                // println!("\tExploring rule {:?} {:?}, {:?}", r.get_expected_cell_value(), r.get_elements(), r.get_result());
+            // Explore all rules of given dimension
+            while rule.has_next() {
+                rule.debug_print();
 
-                let mut space: Space = Space::new(dims);
-                space.set_rule(r.clone());
+                rule_counter += 1;
 
-                // Constructing first cell
-                let mut first_cell: Cell = Cell::new(dims);
-                first_cell.set();
-                space.push_cell(&first_cell.clone());
-                
-                // println!("{:?}", space.get_cells());
-                    
+                let mut space: Space = Space::new(dim_len);
+                space.set_rule(&rule);
 
-                // Iterations
-                let mut it = 1;
-                // println!("\t\tIteration {} has {} elements set out of {}", it, space.find_number_of_cells(CellValue::Set), space.len());
-                    
-                // Condition must always hold, remember prime number generation in order
-                while it < self.expected_num_set_cells.len() && space.find_number_of_cells(CellValue::Set) == *self.expected_num_set_cells.get(it-1).unwrap() 
-                {
-                    if it > max_iteration {
-                        max_iteration = it;
-                        max_itr_rule = Some(space.get_rule().clone());
+                let mut __cell: Cell = Cell::new(dim_len);
+                __cell.set();
+                space.push_cell(&__cell);
+                space.debug_print();
+
+                let mut all_matched: bool = true;
+                let mut match_counter = 0;
+                for el in self.expected_num_set_cells.clone() {
+                    if space.find_number_of_cells(CellValue::Set) != el {
+                        all_matched = false;
+                        break;
                     }
-                    self.apply_rules(&mut space, it);
-                    
-                    it += 1;
-                    // println!("\t\tIteration {} has {} elements set out of {}", it, space.find_number_of_cells(CellValue::Set), space.len());
+                    match_counter += 1;
+                    space.generate_next_iteration();
+                    for _cell in space.cells.clone().iter() {
+                        let mut c = _cell.clone();
+                        StateExplorer::apply_rule_if_applicable(&rule, &mut c, &space);
+                        space.push_cell(&c);
+                    }
+
+                    if cfg!(debug_assertions) {
+                        println!("Matched {} elements.", match_counter);
+                    }
+                    space.debug_print();
                 }
-    
-                if it == self.expected_num_set_cells.len() {
-                    println!("Found rule generating primes: {:?}", space.get_rule());
+
+                if cfg!(debug_assertions) {
+                    println!("\tDone exploring rule {}", rule_counter);
+                }
+                
+                if all_matched {
+                    println!("All elements matched for rule");
+                    rule.debug_print();
                     return true;
                 }
+                rule.generate_next();
             }
 
-            println!("\tExplored {} rules for dimension {}. Max values matched is {} in rule {:?}", rule_count, dims, max_iteration, max_itr_rule.unwrap());
+            println!("Done exploring dimension {}, explored {} rules", dim_len, rule_counter);
         }
 
         println!("Found no rule with dimensions between {} and {} that can generate primes", self.min_dimensions, self.max_dimensions);
@@ -77,112 +82,66 @@ impl StateExplorer {
         false
     }
 
-
-    fn is_rule_applicable(&self, cell: &Cell, space: &Space) -> bool {
-        // Orientation-agnostic, hence (1,2,3), (3,1,2), (2,3,1) are the same
-        let mut rule = space.get_rule().get_applicable_coordinate().clone();
-
-        let mut rule_it = 0;
-        let mut negated: bool = false;
-        let mut applied : bool = false;
-        while rule_it < rule.len() {
-            
-            if !applied {
-                applied = true;
-            }
-            else if applied && !negated {
-                let mut it = 0;
-                while it < rule.len() {
-                    if rule[it] == RuleCoordinate::Positive {
-                        rule[it] = RuleCoordinate:: Negative;
-                    }
-                    else if rule[it] == RuleCoordinate::Negative {
-                        rule[it] = RuleCoordinate::Positive;
-                    }
-                    it +=1;
-                }
-                negated = true;
-            }
-
-            let mut new_cell : Cell = cell.clone();
-
-            let mut i = 0;
-            for it in rule.iter() {
-                if (*it) == RuleCoordinate::Positive {
-                    new_cell.set_ith_coordinate(i, new_cell.get_ith_coordinate(i) + 1);
-                }
-                else if (*it) == RuleCoordinate::Negative {
-                    new_cell.set_ith_coordinate(i, new_cell.get_ith_coordinate(i) - 1);    
-                }
-                i += 1;
-            }
-    
-            let found_cell: Option<&Cell> = space.search_cells(new_cell.get_coordinates());
-    
-            if found_cell == None {
-                if space.get_rule().get_expected_cell_value() == CellValue::Unset {
-                    return true;
-                }
-            }
-            else {
-                if space.get_rule().get_expected_cell_value() == CellValue::Unset {
-                    if found_cell.unwrap().get_value() != CellValue::Set {
-                        return true;
-                    } 
-                } else {
-                    if found_cell.unwrap().get_value() == CellValue::Set {
-                        return true;
-                    }
-                }
-            }
-
-            if applied && negated {
-                // Negate to original
-                let mut it = 0;
-                while it < rule.len() {
-                    if rule[it] == RuleCoordinate::Positive {
-                        rule[it] = RuleCoordinate:: Negative;
-                    }
-                    else if rule[it] == RuleCoordinate::Negative {
-                        rule[it] = RuleCoordinate::Positive;
-                    }
-                    it +=1;
-                }
-
-                rule_it += 1;
-                rule.rotate_right(1);
-                applied = false;
-                negated = false;
-            }
+    pub fn apply_rule_if_applicable(rule: &Rule, cell: &mut Cell, space: &Space) {
+        if StateExplorer::is_rule_applicable(rule, cell, space) {
+            StateExplorer::apply_rule(rule, cell);
         }
-        false
     }
 
-
-    fn apply_rules(&self, space: &mut Space, intented_iteration: usize) {
-        if intented_iteration < space.get_current_iteration() {
-            println!("Intented iteration < self.it");
-            return;
+    fn apply_rule(rule: &Rule, cell: &mut Cell) {
+        if rule.result == Action::Set {
+            cell.set();
         }
+        else if rule.result == Action::Unset {
+            cell.unset();
+        }
+        else {
+            cell.flip();
+        }
+    }
 
-        let mut it = 0;
-        let mut pending: Vec<(usize, Cell)> = vec![];
+    fn is_rule_applicable(rule: &Rule, cell: &mut Cell, space: &Space) -> bool {
+        // Always reset before applying rules
+        cell.reset_explore();
 
-        while it < space.get_cells().len() {
-            let r = space.get_rule().clone();
-            let mut c: Cell = space.get_ith_cell_mut(it).clone();
-            if self.is_rule_applicable(&mut c, space) {
-                r.apply_rule(&mut c);
-                pending.push((it, c));
+        // truth values to be applied to condition
+        let mut v: Vec<bool> = vec![];
+        
+        let cell_coordinates: Vec<i32> = cell.get_nearby_coordinate();
+        let cell_in_space = space.search_cells(&cell_coordinates);
+        if cell_in_space == None {
+            // Cell unset
+            v.push(false);
+        }
+        else {
+            if cell_in_space.unwrap().get_value() == CellValue::Set {
+                v.push(true);
             }
-            it += 1;
+            else {
+                v.push(false);
+            }
         }
 
-        for it in pending.iter_mut() {
-            space.set_ith_cell(it.0, &mut it.1);
+        while cell.has_unexplored_nearby_cell() {
+            cell.generate_next_unexplored_nearby_cell();
+            let cell_coordinates: Vec<i32> = cell.get_nearby_coordinate();
+            
+            let cell_in_space = space.search_cells(&cell_coordinates);
+            if cell_in_space == None {
+                // Cell unset
+                v.push(false);
+            }
+            else {
+                if cell_in_space.unwrap().get_value() == CellValue::Set {
+                    v.push(true);
+                }
+                else {
+                    v.push(false);
+                }
+            }
         }
 
-        space.gen_next_iteration();
+        return rule.evaluate(&v);
     }
 }
 
@@ -192,10 +151,20 @@ mod test {
 
     #[test]
     fn test_is_rule_applicable() {
-        let explorer: StateExplorer = StateExplorer::new(1, 2, vec![1,3,5,7]);
+        let mut explorer: StateExplorer = StateExplorer::new(1, 1, vec![1,3,5,7,9,11,13,15]);
         assert_eq!(explorer.explore(), true);
 
-        let explorer2: StateExplorer = StateExplorer::new(1, 5, vec![1,11,61,231]);
-        assert_eq!(explorer2.explore(), true);
+        explorer = StateExplorer::new(1, 1, vec![1,2,3,4,5,6,7,8,9]);
+        assert_eq!(explorer.explore(), true);
+
+        explorer = StateExplorer::new(1, 1, vec![1,2,3,5,7,11]);
+        assert_eq!(explorer.explore(), false);
+
+        explorer = StateExplorer::new(2, 2, vec![1,2,3,4,5,6,7,8,9]);
+        assert_eq!(explorer.explore(), true);
+
+        // Warning: This takes a few seconds
+        explorer = StateExplorer::new(2, 2, vec![1,3,5,7,9,11,13,15]);
+        assert_eq!(explorer.explore(), true);
     }
 }

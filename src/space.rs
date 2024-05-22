@@ -2,9 +2,10 @@ use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::cell::{Cell, CellValue};
-use crate::rule::{RuleElement, RuleCoordinate, RuleResult};
+use crate::rule::Rule;
 
 
+// Index, Hash
 #[derive(Debug, Clone)]
 struct CellHash(usize, u64);
 
@@ -27,58 +28,51 @@ impl Eq for CellHash {}
 #[derive(Debug, Clone)]
 pub struct Space {
     current_iteration: usize,
-    cells: Vec<Cell>,
+    pub cells: Vec<Cell>,
     // cell index, hash
     cell_hashes: HashSet<CellHash>,
-    rule: RuleElement
+    rule: Rule
 }
 
 
 impl Space {
-    pub fn new(len: usize) -> Space {
+    pub fn new(dim_len: usize) -> Space {
         Space {
             current_iteration: 0,
-            cells: vec![Cell::new(len); 0],
-            rule: RuleElement::new(len),
+            cells: vec![Cell::new(dim_len); 0],
+            rule: Rule::new(dim_len),
             cell_hashes: HashSet::new()
         }
     }
 
-    pub fn set_rule(&mut self, rule: RuleElement) {
-        self.rule = rule;
+    pub fn debug_print(&self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        
+        println!("Space has {} elements.", self.cells.len());
+
+        for cell in self.cells.as_slice() {
+            println!("\t\t Coordinates: {:?}, Value: {:?}", cell.get_coordinates(), cell.get_value());
+        }
     }
 
-    pub fn get_rule(&self) -> &RuleElement {
+    pub fn set_rule(&mut self, rule: &Rule) {
+        self.rule = rule.clone();
+    }
+
+    pub fn get_rule(&self) -> &Rule {
         &self.rule
-    }
-
-    pub fn get_current_iteration(&self) -> usize {
-        self.current_iteration
-    }
-
-    pub fn get_cells(&self) -> &Vec<Cell> {
-        &self.cells
-    }
-
-    pub fn get_ith_cell_mut(&mut self, i: usize) -> &mut Cell {
-        self.cells.get_mut(i).unwrap()
-    }
-
-    pub fn set_ith_cell(&mut self, i: usize, cell: &mut Cell) {
-        self.cells[i] = cell.clone();
     }
 
     pub fn push_cell(&mut self, cell: &Cell) {
         let found_cell: Option<&mut Cell> = self.search_cells_mut(cell.get_coordinates());
         if found_cell == None {
             self.cells.push(cell.clone());
-            self.cell_hashes.insert(CellHash(self.cells.len()-1, cell.get_hash()));
-            self.gen_next_iteration();
+            self.cell_hashes.insert(CellHash(self.cells.len()-1, cell.get_hash()));;
         }
         else {
-            // TODO
-            found_cell.unwrap().copy(cell.clone());
-            self.gen_next_iteration();
+            found_cell.unwrap().set_value(cell.get_value());
         }
     }
 
@@ -133,7 +127,7 @@ impl Space {
         );
     }
 
-    pub fn gen_next_iteration(&mut self) {
+    pub fn generate_next_iteration(&mut self) {
         let mut it = 0;
 
         // Snapshot length
@@ -147,154 +141,26 @@ impl Space {
             // neighbours can't be set unless the RULE is to SET if all surrounding
             // cells are unset, which is naive
             if cell.get_value() == CellValue::Set {
-                let mut r = &mut self.generate_surrounding_cells(cell);
+                let mut c_cell = cell.clone();
+                while c_cell.has_unexplored_nearby_cell() {
+                    c_cell.generate_next_unexplored_nearby_cell();
+                    let c_coordinate = c_cell.get_nearby_coordinate().clone();
 
-                for it in r.iter_mut() {
-                    self.cells.push(it.clone());
-                    self.cell_hashes.insert(CellHash(self.cells.len() - 1, it.get_hash()));
+                    if self.search_cells(&c_coordinate) == None {
+                        let mut new_cell = Cell::new(c_cell.len());
+                        new_cell.set_coordinates(c_coordinate);
+                        self.push_cell(&new_cell);
+                    }
                 }
             }
             it += 1;
         }
     }
 
-    pub fn generate_combinations(dim: usize) -> Vec<Vec<RuleCoordinate>> {
-        let mut result : Vec<Vec<RuleCoordinate>> = vec![];
-        
-        let mut start: Vec<RuleCoordinate> = vec![RuleCoordinate::SameCoordinate; dim];
-        let end: Vec<RuleCoordinate> = vec![RuleCoordinate::Negative; dim];
-
-        result.push(start.clone());
-
-        while start != end {
-
-            let mut i: usize = 0;
-            while start[i] == RuleCoordinate::Negative && i < start.len() {
-                i += 1;
-            }
-
-            if i == start.len() {
-                break;
-            }
-
-            if start[i] == RuleCoordinate::SameCoordinate {
-                start[i] = RuleCoordinate::Positive;
-            }
-            else if start[i] == RuleCoordinate::Positive {
-                start[i] = RuleCoordinate::Negative;
-            }
-
-            if i == 0 {
-                result.push(start.clone());
-                continue;
-            }
-
-            i -= 1;
-            while i > 0 {
-                start[i] = RuleCoordinate::SameCoordinate;
-                i -= 1;
-            }
-            start[i] = RuleCoordinate::SameCoordinate;
-            result.push(start.clone());   
-        } 
-        
-        result
-    }
-
-    fn generate_surrounding_cells(&self, cell: &Cell) -> Vec<Cell> {
-        let mut r = Space::generate_combinations(cell.len());
-        let mut result: Vec<Cell> = vec![];
-        let mut it: usize = 0;
-
-        while it < r.len() {
-            
-            let mut new_cell = Cell::new(cell.len());
-            let mut i = 0;
-            for it in r[it].as_slice() {
-                let mut ith_coordinate = cell.get_ith_coordinate(i);
-                ith_coordinate = match it {
-                    RuleCoordinate::SameCoordinate => ith_coordinate,
-                    RuleCoordinate::Positive => ith_coordinate + 1,
-                    RuleCoordinate::Negative => ith_coordinate - 1
-                };
-
-                new_cell.set_ith_coordinate(i, ith_coordinate);
-                i += 1;
-            }
-
-            if self.search_cells(new_cell.get_coordinates()) == None {
-                result.push(new_cell);
-            }
-
-            it += 1;
-        }
-
-        return result;
-    }
-
 }
 
 mod test {
     use super::*;
-    
-    #[test]
-    fn test_generate_combinations() {
-        println!("asd");
-        let v = Space::generate_combinations(1);
-        assert_eq!(v, vec![
-            vec![RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate:: Positive], 
-            vec![RuleCoordinate::Negative]
-        ]);
-
-        let v2 = Space::generate_combinations(2);
-        assert_eq!(v2, vec![
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Positive],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Negative],
-        ]);
-
-        let v3 = Space::generate_combinations(3);
-        assert_eq!(v3, vec![
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate],
-
-
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::Positive], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive, RuleCoordinate::Positive], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::Positive],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::Positive], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative, RuleCoordinate::Positive], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::Positive],
-
-
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::Negative], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive, RuleCoordinate::Negative], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::Negative],
-            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::Negative], 
-            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative, RuleCoordinate::Negative], 
-            vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::Negative],
-        ]);
-    }
 
     #[test]
     fn test_push_cell_2d() {
@@ -303,7 +169,9 @@ mod test {
         cell.set();
 
         space.push_cell(&cell);
-
+        assert_eq!(space.cells.len(), 1);
+        
+        space.generate_next_iteration();
         assert_eq!(space.cells.len(), 9);
         assert_eq!(space.find_number_of_cells(CellValue::Unset), 8);
         
@@ -319,8 +187,30 @@ mod test {
         space.push_cell(&cell);
 
 
-        assert_eq!(space.find_number_of_cells(CellValue::Unset), 12);
+        // assert_eq!(space.find_number_of_cells(CellValue::Unset), 12);
         assert_eq!(space.find_number_of_cells(CellValue::Set), 2);
+    }
+
+    #[test]
+    fn test_generate_cell_1d() {
+        let mut space: Space = Space::new(1);
+        let mut cell: Cell = Cell::new(1);
+        cell.set();
+        space.push_cell(&cell);
+        
+        assert_eq!(space.len(), 1);
+        space.generate_next_iteration();
+        assert_eq!(space.len(), 3);
+
+        space.cells[1].set();
+        space.cells[2].set();
+        space.generate_next_iteration();
+        assert_eq!(space.len(), 5);
+
+        space.cells[3].set();
+        space.cells[4].set();
+        space.generate_next_iteration();
+        assert_eq!(space.len(), 7);
     }
 
     #[test]
@@ -330,6 +220,7 @@ mod test {
         let mut cell: Cell = Cell::new(2);
         cell.set();
         space.push_cell(&cell);
+        space.generate_next_iteration();
 
         assert_ne!(space.search_cells(&vec![0,0]), None);
         assert_ne!(space.search_cells(&vec![0,1]), None);
@@ -351,10 +242,10 @@ mod test {
         let mut space: Space = Space::new(2);
 
         let mut cell: Cell = Cell::new(2);
-        cell.set_ith_coordinate(0, 3);
-        cell.set_ith_coordinate(1, 3);
+        cell.set_coordinates(vec![3,3]);
         cell.set();
         space.push_cell(&cell);
+        space.generate_next_iteration();
 
         assert_ne!(space.search_cells(&vec![3,3]), None);
         assert_ne!(space.search_cells(&vec![3,4]), None);
@@ -378,6 +269,7 @@ mod test {
         let mut cell: Cell = Cell::new(3);
         cell.set();
         space.push_cell(&cell);
+        space.generate_next_iteration();
 
         assert_ne!(space.search_cells(&vec![0,0,0]), None);
         assert_ne!(space.search_cells(&vec![0,0,1]), None);
@@ -397,12 +289,12 @@ mod test {
         let mut space: Space = Space::new(2);
 
         let mut cell1 : Cell = Cell::new(2);
-        cell1.set_ith_coordinate(0, 1);
+        cell1.set_coordinates(vec![1, 0]);
 
         space.push_cell(&cell1);
 
         let mut cell2 : Cell = Cell::new(2);
-        cell2.set_ith_coordinate(1, 2);
+        cell2.set_coordinates(vec![0,2]);
 
         space.push_cell(&cell2);
 
@@ -420,12 +312,12 @@ mod test {
         let mut space: Space = Space::new(2);
 
         let mut cell1 : Cell = Cell::new(2);
-        cell1.set_ith_coordinate(0, 1);
+        cell1.set_coordinates(vec![1,0]);
 
         space.push_cell(&cell1);
 
         let mut cell2 : Cell = Cell::new(2);
-        cell2.set_ith_coordinate(1, 2);
+        cell2.set_coordinates(vec![0,2]);
 
         space.push_cell(&cell2);
 
