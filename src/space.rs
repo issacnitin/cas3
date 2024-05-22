@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::cell::{Cell, CellValue};
-use crate::rule::{Rule, RuleCoordinate, RuleResult};
+use crate::rule::{RuleElement, RuleCoordinate, RuleResult};
 
 
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ pub struct Space {
     cells: Vec<Cell>,
     // cell index, hash
     cell_hashes: HashSet<CellHash>,
-    rule: Rule
+    rule: RuleElement
 }
 
 
@@ -39,16 +39,16 @@ impl Space {
         Space {
             current_iteration: 0,
             cells: vec![Cell::new(len); 0],
-            rule: Rule::new(len),
+            rule: RuleElement::new(len),
             cell_hashes: HashSet::new()
         }
     }
 
-    pub fn set_rule(&mut self, rule: Rule) {
+    pub fn set_rule(&mut self, rule: RuleElement) {
         self.rule = rule;
     }
 
-    pub fn get_rule(&self) -> &Rule {
+    pub fn get_rule(&self) -> &RuleElement {
         &self.rule
     }
 
@@ -158,22 +158,59 @@ impl Space {
         }
     }
 
-    fn generate_surrounding_cells(&self, cell: &Cell) -> Vec<Cell> {
-        let mut r: Rule = Rule::new(cell.len()); // Fake rule so we can use RuleCoordiantes
+    pub fn generate_combinations(dim: usize) -> Vec<Vec<RuleCoordinate>> {
+        let mut result : Vec<Vec<RuleCoordinate>> = vec![];
+        
+        let mut start: Vec<RuleCoordinate> = vec![RuleCoordinate::SameCoordinate; dim];
+        let end: Vec<RuleCoordinate> = vec![RuleCoordinate::Negative; dim];
 
-        let mut result: Vec<Cell> = vec![];
+        result.push(start.clone());
 
-        while r.has_next_rule() {
-            r = r.gen_next_rule();
+        while start != end {
 
-            // Only consider one rule for idempotency (avoid duplicates)
-            if r.get_result() != RuleResult::Unset {
+            let mut i: usize = 0;
+            while start[i] == RuleCoordinate::Negative && i < start.len() {
+                i += 1;
+            }
+
+            if i == start.len() {
+                break;
+            }
+
+            if start[i] == RuleCoordinate::SameCoordinate {
+                start[i] = RuleCoordinate::Positive;
+            }
+            else if start[i] == RuleCoordinate::Positive {
+                start[i] = RuleCoordinate::Negative;
+            }
+
+            if i == 0 {
+                result.push(start.clone());
                 continue;
             }
+
+            i -= 1;
+            while i > 0 {
+                start[i] = RuleCoordinate::SameCoordinate;
+                i -= 1;
+            }
+            start[i] = RuleCoordinate::SameCoordinate;
+            result.push(start.clone());   
+        } 
+        
+        result
+    }
+
+    fn generate_surrounding_cells(&self, cell: &Cell) -> Vec<Cell> {
+        let mut r = Space::generate_combinations(cell.len());
+        let mut result: Vec<Cell> = vec![];
+        let mut it: usize = 0;
+
+        while it < r.len() {
             
             let mut new_cell = Cell::new(cell.len());
             let mut i = 0;
-            for it in r.get_elements() {
+            for it in r[it].as_slice() {
                 let mut ith_coordinate = cell.get_ith_coordinate(i);
                 ith_coordinate = match it {
                     RuleCoordinate::SameCoordinate => ith_coordinate,
@@ -188,6 +225,8 @@ impl Space {
             if self.search_cells(new_cell.get_coordinates()) == None {
                 result.push(new_cell);
             }
+
+            it += 1;
         }
 
         return result;
@@ -198,6 +237,65 @@ impl Space {
 mod test {
     use super::*;
     
+    #[test]
+    fn test_generate_combinations() {
+        println!("asd");
+        let v = Space::generate_combinations(1);
+        assert_eq!(v, vec![
+            vec![RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate:: Positive], 
+            vec![RuleCoordinate::Negative]
+        ]);
+
+        let v2 = Space::generate_combinations(2);
+        assert_eq!(v2, vec![
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Positive],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Negative],
+        ]);
+
+        let v3 = Space::generate_combinations(3);
+        assert_eq!(v3, vec![
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate],
+
+
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::Positive], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive, RuleCoordinate::Positive], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::Positive],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::Positive], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative, RuleCoordinate::Positive], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::Positive],
+
+
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::Negative], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Positive, RuleCoordinate::Negative], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::Negative],
+            vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::Negative], 
+            vec![RuleCoordinate:: Positive, RuleCoordinate::Negative, RuleCoordinate::Negative], 
+            vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::Negative],
+        ]);
+    }
+
     #[test]
     fn test_push_cell_2d() {
         let mut space: Space = Space::new(2);

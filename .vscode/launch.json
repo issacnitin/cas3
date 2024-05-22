@@ -7,13 +7,13 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'my-project'",
+            "name": "Debug unit tests in executable 'cellular-automata'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
                     "--bin=cellular_automata_state_search",
-                    "--package=cellular_automata_state_search",
+                    "--package=cellular_automata_state_search"
                 ],
                 "filter": {
                     "name": "cellular_automata_state_search",

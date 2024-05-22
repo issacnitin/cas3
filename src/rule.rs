@@ -1,5 +1,6 @@
 use crate::cell::CellValue;
 use crate::cell::Cell;
+use crate::graph::op_node::OpNode;
 use crate::space::Space;
 
 #[derive(PartialEq, Clone, Debug)]
@@ -19,17 +20,23 @@ pub enum RuleResult {
 
 
 #[derive(PartialEq, Clone, Debug)]
-pub struct Rule {
+pub struct RuleElement {
     expected_cell_value: CellValue,
-    elements: Vec<RuleCoordinate>,
+    applicable_coordinate: Vec<RuleCoordinate>,
+    // TODO: Remove after Rule-Set is developed
     result: RuleResult,
 }
 
-impl Rule {
+pub struct RuleSet {
+    applicable_elements: Vec<RuleElement>, 
+    condition: OpNode
+}
+
+impl RuleElement {
     pub fn new(len: usize) -> Self {
-        Rule {
+        RuleElement {
             expected_cell_value: CellValue::Unset,
-            elements: vec![RuleCoordinate::SameCoordinate; len],
+            applicable_coordinate: vec![RuleCoordinate::SameCoordinate; len],
             result: RuleResult::Unset,
         }
     }
@@ -38,12 +45,12 @@ impl Rule {
         self.expected_cell_value = expected;
     }
 
-    pub fn set_elements(&mut self, coordinates: Vec<RuleCoordinate>) {
-        self.elements = coordinates;
+    pub fn set_applicable_coordinate(&mut self, coordinates: Vec<RuleCoordinate>) {
+        self.applicable_coordinate = coordinates;
     }
 
-    pub fn get_elements(&self) -> Vec<RuleCoordinate> {
-        return self.elements.clone();
+    pub fn get_applicable_coordinate(&self) -> Vec<RuleCoordinate> {
+        return self.applicable_coordinate.clone();
     }
 
     pub fn get_result(&self) -> RuleResult {
@@ -58,9 +65,9 @@ impl Rule {
         self.result = result;
     }
 
-    pub fn has_next_rule(&self) -> bool {
-        for it in self.elements.clone() {
-            if (it) != RuleCoordinate::Negative {
+    pub fn has_next_applicable_coordinate(&self) -> bool {
+        for it in self.applicable_coordinate.clone() {
+            if (it) != RuleCoordinate::Positive {
                 return true;
             }
         }
@@ -68,52 +75,54 @@ impl Rule {
         return !(self.result == RuleResult::Flip);
     }
 
-    // Goes from SameCoordinate -> Positive -> Negative
-    pub fn gen_next_rule(self) -> Self {
+    // Goes from SameCoordinate -> Positive
+    pub fn gen_next_applicable_coordinate(self) -> Self {
 
         if self.result == RuleResult::Unset {
-            return Rule {
+            return RuleElement {
                 expected_cell_value: self.expected_cell_value,
-                elements: self.elements.clone(),
+                applicable_coordinate: self.applicable_coordinate.clone(),
                 result: RuleResult::Set
             }
         }
         else if self.result == RuleResult::Set {
-            return Rule {
+            return RuleElement {
                 expected_cell_value: self.expected_cell_value,
-                elements: self.elements.clone(),
+                applicable_coordinate: self.applicable_coordinate.clone(),
                 result: RuleResult::Flip
             }
         }
 
         let mut it: usize = 0;
-        let mut new_vec = self.elements.clone();
+        let mut new_vec = self.applicable_coordinate.clone();
 
-        while new_vec[it] == RuleCoordinate::Negative {
+        while it < new_vec.len() && new_vec[it] == RuleCoordinate::Positive {
             new_vec[it] = RuleCoordinate::SameCoordinate;
             it += 1;
         }
 
-        if it >= self.elements.len() {
+        if it >= self.applicable_coordinate.len() {
             panic!("Overflow");
         }
         
         if new_vec[it] == RuleCoordinate::SameCoordinate {
             new_vec[it] = RuleCoordinate::Positive;
         }
+        /*
+        Skipping making it negative, as is_rule_applicable already does it
         else if new_vec[it] == RuleCoordinate::Positive {
             new_vec[it] = RuleCoordinate::Negative;
         }
+        */
         
-        Rule {
+        RuleElement {
             expected_cell_value: self.expected_cell_value,
-            elements: new_vec,
+            applicable_coordinate: new_vec,
             result: RuleResult::Unset
         }
     }
 
     pub fn apply_rule(&self, cell: &mut Cell) {
-
         if self.result == RuleResult::Unset {
             cell.unset();
         }
@@ -134,198 +143,114 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let rule : Rule = Rule::new(10);
+        let rule : RuleElement = RuleElement::new(10);
 
-        assert_eq!(rule.elements.len(), 10);
+        assert_eq!(rule.applicable_coordinate.len(), 10);
         
-        for it in rule.elements.iter() {
+        for it in rule.applicable_coordinate.iter() {
             assert_eq!(*it, RuleCoordinate::SameCoordinate);
         }
     }
 
+
+    #[test]
+    fn test_apply_rule() {
+        let mut rule: RuleElement = RuleElement::new(2);
+        rule.set_applicable_coordinate(vec![RuleCoordinate::Positive, RuleCoordinate::Positive]);
+        rule.set_expected_cell_value(CellValue::Set);
+        rule.set_result(RuleResult::Set);   
+
+        let mut space: Space = Space::new(2);
+        let mut cell0: Cell = Cell::new(2);
+        cell0.set();
+
+        space.push_cell(&cell0);
+        space.gen_next_iteration();
+
+        space.set_rule(rule.clone());
+        
+        assert_eq!(space.get_cells().len(), 9);
+
+        for mut it in space.get_cells().clone() {
+            rule.apply_rule(&mut it);
+            assert_eq!(it.get_value(), CellValue::Set);
+            space.push_cell(&it);
+        }
+
+        space.gen_next_iteration();
+        assert_eq!(space.get_cells().len(), 25);
+
+        for mut it in space.get_cells().clone() {
+            rule.apply_rule(&mut it);
+            assert_eq!(it.get_value(), CellValue::Set);
+        }
+
+    }
+
     #[test]
     fn test_next_gen() {
-        let mut rule : Rule = Rule {
+        let mut rule : RuleElement = RuleElement {
             expected_cell_value: CellValue::Unset,
-            elements : vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate],
+            applicable_coordinate : vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate],
             result: RuleResult::Unset
         };
 
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
         assert_eq!(rule.result, RuleResult::Set);
 
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
         assert_eq!(rule.result, RuleResult::Flip);
 
 
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
         assert_eq!(rule.result, RuleResult::Unset);
 
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
         assert_eq!(rule.result, RuleResult::Set);
 
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
         assert_eq!(rule.result, RuleResult::Flip);
 
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
-        assert_eq!(rule.result, RuleResult::Unset);
-
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
-        assert_eq!(rule.result, RuleResult::Set);
-
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate]);
         assert_eq!(rule.result, RuleResult::Flip);
 
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::Positive, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate]);
         assert_eq!(rule.result, RuleResult::Flip);
 
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive]);
         assert_eq!(rule.result, RuleResult::Flip);
 
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive]);
         assert_eq!(rule.result, RuleResult::Flip);
 
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::Positive]);
         assert_eq!(rule.result, RuleResult::Flip);
 
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate]);
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        rule = rule.gen_next_applicable_coordinate();
+        assert_eq!(rule.applicable_coordinate, vec![RuleCoordinate::Positive, RuleCoordinate::Positive, RuleCoordinate::Positive]);
         assert_eq!(rule.result, RuleResult::Flip);
 
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::SameCoordinate]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-        
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::Positive, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::Negative, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::Positive]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::SameCoordinate, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Positive, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::Positive, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::Positive, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::SameCoordinate, RuleCoordinate::Negative, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Positive, RuleCoordinate::Negative, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
-
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        rule = rule.gen_next_rule();
-        assert_eq!(rule.elements, vec![RuleCoordinate::Negative, RuleCoordinate::Negative, RuleCoordinate::Negative]);
-        assert_eq!(rule.result, RuleResult::Flip);
     }
 }
