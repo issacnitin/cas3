@@ -41,9 +41,13 @@ impl Rule {
         if !cfg!(debug_assertions) {
             return;
         }
-        
+
+        self.print();
+    }
+
+    pub fn print(&self) {
         print!("Rule: ");
-        self.condition.debug_print();
+        self.condition.print();
         println!("");
         println!("Action: {:?}", self.result);
     }

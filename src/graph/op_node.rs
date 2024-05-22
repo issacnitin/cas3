@@ -45,6 +45,10 @@ impl OpNode {
             return;
         }
 
+        self.print();
+    }
+
+    pub fn print(&self) {
         // Leaf node
         if self.start_index == self.end_index {
             if self.operation == Op::Not {
@@ -59,7 +63,7 @@ impl OpNode {
         print!("( ");
 
         if self.left_child != None {
-            self.left_child.as_ref().unwrap().debug_print();
+            self.left_child.as_ref().unwrap().print();
         }
 
         if self.operation == Op::And {
@@ -70,7 +74,7 @@ impl OpNode {
         }
 
         if self.right_child != None {
-            self.right_child.as_ref().unwrap().debug_print();
+            self.right_child.as_ref().unwrap().print();
         }
 
         print!(" )");

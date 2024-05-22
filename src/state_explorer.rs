@@ -68,7 +68,7 @@ impl StateExplorer {
                 
                 if all_matched {
                     println!("All elements matched for rule");
-                    rule.debug_print();
+                    rule.print();
                     return true;
                 }
                 rule.generate_next();
