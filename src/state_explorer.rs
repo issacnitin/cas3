@@ -29,47 +29,52 @@ impl StateExplorer {
 
             // Explore all rules of given dimension
             while rule.has_next() {
-                rule.debug_print();
+                // For all evaluation permutations 
+                while rule.has_next_eval_permutation() {
+                    rule.debug_print();
 
-                rule_counter += 1;
-
-                let mut space: Space = Space::new(dim_len);
-                space.set_rule(&rule);
-
-                let mut __cell: Cell = Cell::new(dim_len);
-                __cell.set();
-                space.push_cell(&__cell);
-                space.debug_print();
-
-                let mut all_matched: bool = true;
-                let mut match_counter = 0;
-                for el in self.expected_num_set_cells.clone() {
-                    if space.find_number_of_cells(CellValue::Set) != el {
-                        all_matched = false;
-                        break;
-                    }
-                    match_counter += 1;
-                    space.generate_next_iteration();
-                    for _cell in space.cells.clone().iter() {
-                        let mut c = _cell.clone();
-                        StateExplorer::apply_rule_if_applicable(&rule, &mut c, &space);
-                        space.push_cell(&c);
-                    }
-
-                    if cfg!(debug_assertions) {
-                        println!("Matched {} elements.", match_counter);
-                    }
+                    rule_counter += 1;
+    
+                    let mut space: Space = Space::new(dim_len);
+                    space.set_rule(&rule);
+    
+                    let mut __cell: Cell = Cell::new(dim_len);
+                    __cell.set();
+                    space.push_cell(&__cell);
                     space.debug_print();
-                }
+    
+                    let mut all_matched: bool = true;
+                    let mut match_counter = 0;
+                    for el in self.expected_num_set_cells.clone() {
+                        if space.find_number_of_cells(CellValue::Set) != el {
+                            all_matched = false;
+                            break;
+                        }
+                        match_counter += 1;
+                        space.generate_next_iteration();
+                        for _cell in space.cells.clone().iter() {
+                            let mut c = _cell.clone();
+                            StateExplorer::apply_rule_if_applicable(&rule, &mut c, &space);
+                            space.push_cell(&c);
+                        }
+    
+                        if cfg!(debug_assertions) {
+                            println!("Matched {} elements.", match_counter);
+                        }
+                        space.debug_print();
+                    }
+    
+                    if cfg!(debug_assertions) {
+                        println!("\tDone exploring rule {}", rule_counter);
+                    }
+                    
+                    if all_matched {
+                        println!("All elements matched for rule");
+                        rule.print();
+                        return true;
+                    }
 
-                if cfg!(debug_assertions) {
-                    println!("\tDone exploring rule {}", rule_counter);
-                }
-                
-                if all_matched {
-                    println!("All elements matched for rule");
-                    rule.print();
-                    return true;
+                    rule.generate_next_eval_permutation();
                 }
                 rule.generate_next();
             }

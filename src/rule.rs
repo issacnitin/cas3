@@ -52,6 +52,15 @@ impl Rule {
         println!("Action: {:?}", self.result);
     }
 
+    pub fn has_next_eval_permutation(&self) -> bool {
+        self.condition.has_next_eval_permutation()
+    }
+
+    pub fn generate_next_eval_permutation(&mut self) {
+        // Only called on root node
+        self.condition.generate_next_eval_permutation();
+    }
+
     pub fn has_next(&self) -> bool {
         self.condition.has_next()
     }
@@ -71,6 +80,6 @@ impl Rule {
     }
 
     pub fn evaluate(&self, v: &Vec<bool>) -> bool {
-        self.condition.evaluate(v)
+        self.condition.evaluate(v, true)
     }
 }
