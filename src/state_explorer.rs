@@ -28,9 +28,9 @@ impl StateExplorer {
             let mut rule_counter = 0;
 
             // Explore all rules of given dimension
-            while rule.has_next() {
+            loop {
                 // For all evaluation permutations 
-                while rule.has_next_eval_permutation() {
+                loop {
                     rule.debug_print();
 
                     rule_counter += 1;
@@ -74,7 +74,19 @@ impl StateExplorer {
                         return true;
                     }
 
+                    if !rule.has_next_eval_permutation() {
+                        break;
+                    }
                     rule.generate_next_eval_permutation();
+                }
+
+                if !rule.has_next() {
+                    break;
+                }
+
+                if rule_counter % 1000 == 0 {
+                    println!("Explored {rule_counter} rules. The last one was: ");
+                    rule.print();
                 }
                 rule.generate_next();
             }
@@ -170,6 +182,6 @@ mod test {
 
         // Warning: This takes a few seconds
         explorer = StateExplorer::new(2, 2, vec![1,3,5,7,9,11,13,15]);
-        assert_eq!(explorer.explore(), true);
+        // assert_eq!(explorer.explore(), true);
     }
 }

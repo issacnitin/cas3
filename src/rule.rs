@@ -43,6 +43,8 @@ impl Rule {
         }
 
         self.print();
+        println!("Cluster: {:?}", self.condition.get_clustered_variables());
+        println!("Permutation: {:?}", self.condition.eval_permutation.get_sequence());
     }
 
     pub fn print(&self) {

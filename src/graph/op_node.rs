@@ -17,7 +17,7 @@ pub struct OpNode {
     operation : Op,
     left_child: Option<Box<OpNode>>,
     right_child: Option<Box<OpNode>>,
-    eval_permutation: Permuter,
+    pub eval_permutation: Permuter,
     
     // Aligned to left
     // So if split index = start index, it'll split the array [1], [2..]
@@ -151,7 +151,7 @@ impl OpNode {
      * We have all possible boolean expressions with N variables
      * 
      */
-    fn get_clustered_variables(&self) -> Vec<Vec<usize>> {
+    pub fn get_clustered_variables(&self) -> Vec<Vec<usize>> {
         // Leaf node
         if self.start_index == self.end_index {
             return vec![vec![self.start_index]];
@@ -190,7 +190,9 @@ impl OpNode {
             }
         }
 
-        result.push(same_op_children);
+        if same_op_children. len() > 0 {
+            result.push(same_op_children);
+        }
         
         result
     }
@@ -212,7 +214,7 @@ impl OpNode {
         if apply_permutation_at_current_level {
             // Apply permutation
             // WARN: memory leak, avoid clone?
-            let v = self.eval_permutation.get_replaced_indices();
+            let v = self.eval_permutation.get_sequence();
             for ii in v {
                 permuted_values.push(values[ii]);
             }
