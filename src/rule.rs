@@ -44,18 +44,17 @@ impl Rule {
 
         self.print();
         println!("Cluster: {:?}", self.condition.get_clustered_variables());
-        println!("Permutation: {:?}", self.condition.eval_permutation.get_sequence());
     }
 
     pub fn print(&self) {
         print!("Rule: ");
         self.condition.print();
         println!("");
+        println!("Permutation: {:?}", self.condition.eval_permutation.get_vector());
         println!("Action: {:?}", self.result);
     }
 
     pub fn has_next_eval_permutation(&self) -> bool {
-        return false;
         self.condition.has_next_eval_permutation()
     }
 

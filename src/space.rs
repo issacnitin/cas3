@@ -88,7 +88,7 @@ impl Space {
         }
         else if self.dimension == 2 {
             let start = -6;
-            let end = 8;
+            let end = 6;
             print!("|  |");
             for i in start..end {
                 if i < 0 {

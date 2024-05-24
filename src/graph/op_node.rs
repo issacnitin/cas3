@@ -1,4 +1,4 @@
-use crate::set::set_permuter::Permuter;
+use crate::permutation::vector_permuter::VectorPermuter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -17,7 +17,7 @@ pub struct OpNode {
     operation : Op,
     left_child: Option<Box<OpNode>>,
     right_child: Option<Box<OpNode>>,
-    pub eval_permutation: Permuter,
+    pub eval_permutation: VectorPermuter,
     
     // Aligned to left
     // So if split index = start index, it'll split the array [1], [2..]
@@ -38,10 +38,10 @@ impl OpNode {
             start_index: start_index,
             end_index: end_index,
             split_index: 0,
-            eval_permutation: Permuter::new(vec![])
+            eval_permutation: VectorPermuter::new(end_index - start_index + 1)
         };
         node.reset(start_index, end_index, true);
-        node.eval_permutation.reset(node.get_clustered_variables());
+        node.eval_permutation.reset();
 
         return node;
     }
@@ -109,7 +109,7 @@ impl OpNode {
         (self.left_child != None && self.left_child.as_ref().unwrap().has_next())
         || (self.right_child != None && self.right_child.as_ref().unwrap().has_next())
         || self.operation == Op::And
-        || self.split_index < self.end_index - 1
+        || self.split_index < (self.end_index + 1)/2
     }
 
     fn reset(&mut self, start_index: usize, end_index: usize, reset_split: bool) {  
@@ -125,7 +125,7 @@ impl OpNode {
 
         if start_index == end_index {
             self.operation = Op::None;
-            self.eval_permutation.reset(self.get_clustered_variables());
+            self.eval_permutation.reset();
             return;
         }
 
@@ -136,7 +136,7 @@ impl OpNode {
 
         self.left_child = Some(Box::new(left_node));
         self.right_child = Some(Box::new(right_node));
-        self.eval_permutation.reset(self.get_clustered_variables());
+        self.eval_permutation.reset();
     }
 
     /* 
@@ -214,10 +214,9 @@ impl OpNode {
         if apply_permutation_at_current_level {
             // Apply permutation
             // WARN: memory leak, avoid clone?
-            /* Disable permutation for now */
-            let v = self.eval_permutation.get_sequence();
-            for ii in values {
-                permuted_values.push(*ii);
+            let v = self.eval_permutation.get_vector();
+            for ii in v {
+                permuted_values.push(values[ii]);
             }
 
             evaluation_values = &permuted_values;
@@ -256,7 +255,7 @@ impl OpNode {
         if self.start_index == self.end_index {
             if self.operation == Op::None {
                 self.operation = Op::Not;
-                self.eval_permutation.reset(self.get_clustered_variables());
+                self.eval_permutation.reset();
                 return;
             }
             panic!("Leaf node exhausted next-gen");
@@ -267,7 +266,7 @@ impl OpNode {
         // Check if left_child can be restructured
         if self.left_child != None && self.left_child.as_ref().unwrap().has_next() {
             self.left_child.as_mut().unwrap().generate_next();
-            self.eval_permutation.reset(self.get_clustered_variables());
+            self.eval_permutation.reset();
             return;
         }
         
@@ -276,7 +275,7 @@ impl OpNode {
         if self.right_child != None && self.right_child.as_mut().unwrap().has_next() {
             self.right_child.as_mut().unwrap().generate_next();
             self.left_child.as_mut().unwrap().reset(self.start_index, self.split_index, true);
-            self.eval_permutation.reset(self.get_clustered_variables());
+            self.eval_permutation.reset();
             return;
         }
 
@@ -286,11 +285,13 @@ impl OpNode {
         if self.operation == Op::And {
             self.reset(self.start_index, self.end_index, false);
             self.operation = Op::Or;
-            self.eval_permutation.reset(self.get_clustered_variables());
+            self.eval_permutation.reset();
             return;
         }
 
-        if self.split_index + 1 == self.end_index {
+        // In-order to avoid generating symmetric trees, we restructure till the middle element of array.
+        // All structures generated after are anyways handled by permuting input value array
+        if self.split_index + 1 > (self.end_index + 1)/2 {
             panic!("All possible trees generated");
         }
 
@@ -307,7 +308,7 @@ impl OpNode {
         self.left_child = Some(Box::new(left_node));
         self.right_child = Some(Box::new(right_node));
 
-        self.eval_permutation.reset(self.get_clustered_variables());
+        self.eval_permutation.reset();
     }
 }
 

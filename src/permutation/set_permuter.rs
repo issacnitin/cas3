@@ -7,9 +7,9 @@
 
 // Replace element X with Y
 #[derive(Clone, Debug, PartialEq)]
-pub struct Permuter {
+pub struct SetPermuter {
     data: Vec<Vec<usize>>,
-    child: Option<Box<Permuter>>,
+    child: Option<Box<SetPermuter>>,
 
     x_i: usize,
     x_j: usize,
@@ -18,9 +18,9 @@ pub struct Permuter {
     y_j: usize
 }
 
-impl Permuter {
+impl SetPermuter {
     pub fn new(data: Vec<Vec<usize>>) -> Self {
-        let mut muter = Permuter {
+        let mut muter = SetPermuter {
             data: data,
             child: None,
             x_i: 0,
@@ -183,20 +183,20 @@ mod test {
 
     #[test]
     fn test_permuter_empty() {
-        let mut permuter = Permuter::new(vec![]);
+        let mut permuter = SetPermuter::new(vec![]);
         assert_eq!(permuter.has_next(), false);
     }
 
     #[test]
     fn test_permuter_three_literals_one_set() {
-        let mut permuter = Permuter::new(vec![vec![0, 1, 2]]);
+        let mut permuter = SetPermuter::new(vec![vec![0, 1, 2]]);
         assert_eq!(permuter.get_sequence(), vec![0, 1, 2]);
         assert_eq!(permuter.has_next(), false);
     }
 
     #[test]
     fn test_permuter_three_literals_two_set() {
-        let mut permuter = Permuter::new(vec![vec![0,1], vec![2]]);
+        let mut permuter = SetPermuter::new(vec![vec![0,1], vec![2]]);
         assert_eq!(permuter.get_sequence(), vec![0, 1, 2]);
 
         assert_eq!(permuter.has_next(), true);
@@ -209,7 +209,7 @@ mod test {
 
         assert_eq!(permuter.has_next(), false);
 
-        permuter = Permuter::new(vec![vec![0], vec![1, 2]]);
+        permuter = SetPermuter::new(vec![vec![0], vec![1, 2]]);
         assert_eq!(permuter.get_sequence(), vec![0, 1, 2]);
 
         assert_eq!(permuter.has_next(), true);
@@ -226,7 +226,7 @@ mod test {
 
     #[test]
     fn test_permuter_four_literals() {
-        let mut permuter = Permuter::new(vec![vec![0,1], vec![2,3]]);
+        let mut permuter = SetPermuter::new(vec![vec![0,1], vec![2,3]]);
         assert_eq!(permuter.get_sequence(), vec![0, 1, 2, 3]);
 
         /*
