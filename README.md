@@ -1,4 +1,4 @@
-## Cellular Automata State Space Search for Prime Generation
+## CAS3 - Cellular Automata State Space Search for Prime Generation
 
 Prime numbers are intriguing, they compose all other numbers. Cellular automata is a computational paradigm which has a simple set of rules, works in an N-dimensional grid with a start state, and rules being applied iteratively to every cell in parallel. The rules have input as a cell's immediate neighbours, and output as a state of the cell. For simplicity, the state can be thought of as ON or OFF.
 
@@ -6,8 +6,11 @@ This project attempts to figure out if there is an N-dimensional cellular automa
 
 This project is not computationaly feasible, and is hence a learning project. Contributions are welcome, if you think you can make it do the search faster, do ping me or send in a PR.
 
-Currently, it generates simple sequence such as 1,2,3,4..
-Also 1,3,5,7..
+I found it generating rules for sequence such as :
+<br/>1,2,3,4..
+<br/>1,3,5,7..
+<br/>1,4,9,25,36..
+<br/>The most interesting I've found has been 1, 3, 5, 9, 11, 15, 19, 27
 
 ![](./example.gif)
 

@@ -64,8 +64,6 @@ impl StateExplorer {
                         if cfg!(debug_assertions) {
                             println!("Matched {} elements.", match_counter);
                         }
-                        space.debug_print();
-                        rule.debug_print();
                     }
     
                     if cfg!(debug_assertions) {
