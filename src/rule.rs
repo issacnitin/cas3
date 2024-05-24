@@ -55,6 +55,7 @@ impl Rule {
     }
 
     pub fn has_next_eval_permutation(&self) -> bool {
+        return false;
         self.condition.has_next_eval_permutation()
     }
 

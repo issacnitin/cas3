@@ -28,6 +28,7 @@ impl Eq for CellHash {}
 #[derive(Debug, Clone)]
 pub struct Space {
     current_iteration: usize,
+    dimension: usize,
     pub cells: Vec<Cell>,
     // cell index, hash
     cell_hashes: HashSet<CellHash>,
@@ -39,6 +40,7 @@ impl Space {
     pub fn new(dim_len: usize) -> Space {
         Space {
             current_iteration: 0,
+            dimension: dim_len,
             cells: vec![Cell::new(dim_len); 0],
             rule: Rule::new(dim_len),
             cell_hashes: HashSet::new()
@@ -50,10 +52,76 @@ impl Space {
             return;
         }
         
-        println!("Space has {} elements.", self.cells.len());
+        self.print();
+    }
 
-        for cell in self.cells.as_slice() {
-            println!("\t\t Coordinates: {:?}, Value: {:?}", cell.get_coordinates(), cell.get_value());
+    pub fn print(&self) {
+
+        println!("Space has {} elements.", self.cells.len());
+        println!("Space has {} set elements.", self.find_number_of_cells(CellValue::Set));
+
+        if self.dimension == 1 {
+            // 9 - line matrix
+            let start = -9;
+            let end = 10;
+            print!("|");
+            for i in start..end {
+                if i < 0 {
+                    print!("{}|", i);
+                }
+                else {
+                    print!("+{}|", i);
+                }
+            }
+            println!();
+            print!("|");
+            for i in -9..10 {
+                let cell = self.search_cells(&vec![i]);
+                if cell != None && cell.unwrap().get_value() == CellValue::Set {
+                    print!(" x|");
+                }
+                else {
+                    print!(" -|")
+                }
+            }
+            println!();
+        }
+        else if self.dimension == 2 {
+            let start = -4;
+            let end = 5;
+            print!("|  |");
+            for i in start..end {
+                if i < 0 {
+                    print!("{}|", i);
+                }
+                else {
+                    print!("+{}|", i);
+                }
+            }
+            println!();
+            for i in start..end {
+                if i >= 0 {
+                    print!("|+{}|", i);
+                }
+                else {
+                    print!("|{}|", i);
+                }
+                for j in start..end {
+                    let cell = self.search_cells(&vec![i, j]);
+                    if cell != None && cell.unwrap().get_value() == CellValue::Set {
+                        print!(" X|");
+                    }
+                    else {
+                        print!("  |")
+                    }
+                }
+                println!();
+            }
+        }
+        else {
+            for cell in self.cells.as_slice() {
+                println!("\t\t Coordinates: {:?}, Value: {:?}", cell.get_coordinates(), cell.get_value());
+            }
         }
     }
 

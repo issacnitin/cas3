@@ -1,3 +1,6 @@
+use std::io;
+use std::io::prelude::*;
+
 use crate::cell::CellValue;
 use crate::cell::Cell;
 use crate::rule::Action;
@@ -23,16 +26,13 @@ impl StateExplorer {
     pub fn explore(&self) -> bool {
         // Explore all dimensions
         for dim_len in self.min_dimensions..self.max_dimensions+1 {
-            println!("Exploring dimension {}", dim_len);
             let mut rule = Rule::new(dim_len);
             let mut rule_counter = 0;
-
             // Explore all rules of given dimension
             loop {
                 // For all evaluation permutations 
                 loop {
-                    rule.debug_print();
-
+                    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
                     rule_counter += 1;
     
                     let mut space: Space = Space::new(dim_len);
@@ -41,11 +41,14 @@ impl StateExplorer {
                     let mut __cell: Cell = Cell::new(dim_len);
                     __cell.set();
                     space.push_cell(&__cell);
-                    space.debug_print();
     
                     let mut all_matched: bool = true;
                     let mut match_counter = 0;
                     for el in self.expected_num_set_cells.clone() {
+                        print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+                        println!("Exploring dimension {}", dim_len);
+                        rule.debug_print();
+                        space.debug_print();
                         if space.find_number_of_cells(CellValue::Set) != el {
                             all_matched = false;
                             break;
@@ -62,6 +65,7 @@ impl StateExplorer {
                             println!("Matched {} elements.", match_counter);
                         }
                         space.debug_print();
+                        rule.debug_print();
                     }
     
                     if cfg!(debug_assertions) {
@@ -71,6 +75,7 @@ impl StateExplorer {
                     if all_matched {
                         println!("All elements matched for rule");
                         rule.print();
+                        self.emulate_rule_on_user_input(&rule, dim_len);
                         return true;
                     }
 
@@ -97,6 +102,42 @@ impl StateExplorer {
         println!("Found no rule with dimensions between {} and {} that can generate primes", self.min_dimensions, self.max_dimensions);
         
         false
+    }
+
+    fn emulate_rule_on_user_input(&self, rule: &Rule, dim_len: usize) {
+        let mut stdin = io::stdin();
+        let mut stdout = io::stdout();
+
+        let mut cell = Cell::new(dim_len);
+        cell.set();
+        let mut space = Space::new(dim_len);
+        space.set_rule(rule);
+        space.push_cell(&cell);
+
+        let mut iter_counter = 1;
+
+        loop {
+            print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+            println!("All elements matched for sequence {:?}", self.expected_num_set_cells);
+
+            println!("Emulating rule ");
+            rule.print();
+            println!("Iteration: {}", iter_counter);
+
+            space.generate_next_iteration();
+            space.print();
+            iter_counter += 1;
+            write!(stdout, "Press any key for generating next iteration. Ctrl + C to exit").unwrap();
+            stdout.flush().unwrap();
+            // Read a single byte and discard
+            let _ = stdin.read(&mut [0u8]).unwrap();
+
+            for cell in space.cells.clone().iter() {
+                let mut _cell = cell.clone();
+                StateExplorer::apply_rule_if_applicable(rule, &mut _cell, &space);
+                space.push_cell(&_cell);
+            }
+        }
     }
 
     pub fn apply_rule_if_applicable(rule: &Rule, cell: &mut Cell, space: &Space) {

@@ -236,7 +236,7 @@ mod test {
             println!("{:?}", permuter.get_sequence());
         }
          */
-        
+
         assert_eq!(permuter.has_next(), true);
         permuter.generate_next();
         assert_eq!(permuter.get_sequence(), vec![2, 1, 0, 3]);

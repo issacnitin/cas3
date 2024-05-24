@@ -6,6 +6,10 @@ This project attempts to figure out if there is an N-dimensional cellular automa
 
 This project is not computationaly feasible, and is hence a learning project. Contributions are welcome, if you think you can make it do the search faster, do ping me or send in a PR.
 
+Currently, it generates simple sequence such as 1,2,3,4..
+Also 1,3,5,7..
+
+![](./example.gif)
 
 ### Space
 Start with one cell, apply rules. If successful, the applied rules would produce blocks of cells which are set, and the number of cells in such a block would be prime numbers :D
@@ -35,4 +39,4 @@ Stop the search if successive applications of rule is not producing the next pri
 
 ## Current status
 
-Using a Core-i5 laptop, it can generate rules upto maybe 7th dimension if you run it long enough. No, we haven't found a rule which produce prime numbers. I have a feeling it requires 137 dimensions :)
+Using a Core-i5 laptop, it can generate rules upto maybe 2nd dimension if you run it long enough. No, we haven't found a rule which produce prime numbers. I have a feeling it requires 137 dimensions :)

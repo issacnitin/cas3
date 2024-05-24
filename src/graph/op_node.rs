@@ -214,9 +214,10 @@ impl OpNode {
         if apply_permutation_at_current_level {
             // Apply permutation
             // WARN: memory leak, avoid clone?
+            /* Disable permutation for now */
             let v = self.eval_permutation.get_sequence();
-            for ii in v {
-                permuted_values.push(values[ii]);
+            for ii in values {
+                permuted_values.push(*ii);
             }
 
             evaluation_values = &permuted_values;

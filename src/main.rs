@@ -7,6 +7,6 @@ mod set;
 use crate::state_explorer::StateExplorer;
 
 fn main() {
-    let explorer: StateExplorer = StateExplorer::new(1, 2, vec![1,2,4,8,16]);
+    let explorer: StateExplorer = StateExplorer::new(2, 2, vec![1, 3, 5, 7, 9]);
     explorer.explore();
 }   
