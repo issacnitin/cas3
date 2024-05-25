@@ -28,13 +28,14 @@ impl StateExplorer {
         for dim_len in self.min_dimensions..self.max_dimensions+1 {
             let mut rule = Rule::new(dim_len);
             let mut rule_counter = 0;
+            let mut permutation_counter = 0;
             // Explore all rules of given dimension
             loop {
+                rule_counter += 1;
                 // For all evaluation permutations 
                 loop {
                     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
-                    rule_counter += 1;
-    
+                    permutation_counter += 1;
                     let mut space: Space = Space::new(dim_len);
                     space.set_rule(&rule);
     
@@ -73,7 +74,10 @@ impl StateExplorer {
                     if all_matched {
                         println!("All elements matched for rule");
                         rule.print();
-                        self.emulate_rule_on_user_input(&rule, dim_len);
+
+                        if !cfg!(test) {
+                            self.emulate_rule_on_user_input(&rule, dim_len);
+                        }
                         return true;
                     }
 
@@ -94,10 +98,10 @@ impl StateExplorer {
                 rule.generate_next();
             }
 
-            println!("Done exploring dimension {}, explored {} rules", dim_len, rule_counter);
+            println!("Done exploring dimension {}, explored {} rules and {} permutations", dim_len, rule_counter, permutation_counter);
         }
 
-        println!("Found no rule with dimensions between {} and {} that can generate primes", self.min_dimensions, self.max_dimensions);
+        println!("Found no rule with dimensions between {} and {} that can generate sequence {:?}", self.min_dimensions, self.max_dimensions, self.expected_num_set_cells);
         
         false
     }

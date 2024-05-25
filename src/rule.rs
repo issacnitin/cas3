@@ -64,15 +64,11 @@ impl Rule {
     }
 
     pub fn has_next(&self) -> bool {
-        self.condition.has_next()
+        self.result == Action::Set || self.condition.has_next()
     }
 
     pub fn generate_next(&mut self) {
         if self.result == Action::Set {
-            self.result = Action::Unset;
-            return;
-        }
-        else if self.result == Action::Unset {
             self.result = Action::Flip;
             return;
         }

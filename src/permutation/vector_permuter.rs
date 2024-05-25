@@ -46,19 +46,6 @@ impl VectorPermuter {
         return self.y < self.vector.len() - 1 || self.x < self.vector.len() - 2 || self.child != None;
     }
 
-    /*
-        // INIT - P: ~~0 1 2
-        // Has_next - true
-        // Gen_next - P: ~0 ~1 2, C1: 1 ~0 ~2
-        // Get - 1 2 0 from C1
-        // Has_next - C1 - false, P - true
-        // Gen_next - C1: None, P: ~0 ~1 2
-        // Get - 1 0 2
-        // Has_next - TRUE
-        // Gen_next - P: ~0 1 ~2, C1: 2 ~1 ~0
-        // Get - 2 0 1 from C1
-        // Has_next - C1 - false
-     */
     pub fn generate_next(&mut self) {
         if self.x == 0 && self.y == 0 {
             self.y = 1;

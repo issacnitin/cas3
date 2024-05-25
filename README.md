@@ -40,6 +40,17 @@ Number of dimensions of the universe is unknown. We need to generate for increas
 State space search:
 Stop the search if successive applications of rule is not producing the next prime number in sequence (1,2,3,5,7,11,13...)
 
+### Search Space Pruning
+
+Following techniques has been applied to reduce search space:
+
+* We generating boolean expressions of N variables, would only generate half the tree. The other half is symmetric, and gets 
+handled by the permutation we apply to input variables. So for three variables, we generate from `(A AND B AND C)` to `(A AND (B OR C))`, we won't generate `((A OR B) AND C)`
+* Input variables are clustered if they share the same op next to each other. For ex. `(A AND (B AND C))` clusters `[A,B,C]`. `(A AND (B OR C))` clusters as `[[A,B],[C]]`. These are clustered as the variables can be changed with each other without affecting output for the expression, so no value in permuting on them.
+* We generate permutation of input variables based on clusters. So we generate `[[C,B],[A]]`, `[[A,C],[B]]` but not `[[B,A],C]`.
+* Since we generate all boolean expressions, for cases like `((A AND NOT B) OR C)`, even if we are not permuting (A, B), we will search for the rule `(( NOT A AND B) OR C)` as well
+* Not exploring rules with action "Unset", they are lame
+
 ## Current status
 
 Using a Core-i5 laptop, it can generate rules upto maybe 2nd dimension if you run it long enough. No, we haven't found a rule which produce prime numbers. I have a feeling it requires 137 dimensions :)

@@ -1,4 +1,4 @@
-use crate::permutation::vector_permuter::VectorPermuter;
+use crate::permutation::{set_permuter::SetPermuter, vector_permuter::VectorPermuter};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -17,7 +17,7 @@ pub struct OpNode {
     operation : Op,
     left_child: Option<Box<OpNode>>,
     right_child: Option<Box<OpNode>>,
-    pub eval_permutation: VectorPermuter,
+    pub eval_permutation: SetPermuter,
     
     // Aligned to left
     // So if split index = start index, it'll split the array [1], [2..]
@@ -38,12 +38,16 @@ impl OpNode {
             start_index: start_index,
             end_index: end_index,
             split_index: 0,
-            eval_permutation: VectorPermuter::new(end_index - start_index + 1)
+            eval_permutation: SetPermuter::new(vec![])
         };
         node.reset(start_index, end_index, true);
-        node.eval_permutation.reset();
+        node.reset_permuter();
 
         return node;
+    }
+
+    fn reset_permuter(&mut self) {
+        self.eval_permutation.reset(self.get_clustered_variables());
     }
 
     pub fn has_next_eval_permutation(&self) -> bool {
@@ -109,7 +113,7 @@ impl OpNode {
         (self.left_child != None && self.left_child.as_ref().unwrap().has_next())
         || (self.right_child != None && self.right_child.as_ref().unwrap().has_next())
         || self.operation == Op::And
-        || self.split_index < (self.end_index + 1)/2
+        || self.split_index < (self.end_index + 1)/2 - 1
     }
 
     fn reset(&mut self, start_index: usize, end_index: usize, reset_split: bool) {  
@@ -125,7 +129,7 @@ impl OpNode {
 
         if start_index == end_index {
             self.operation = Op::None;
-            self.eval_permutation.reset();
+            self.reset_permuter();
             return;
         }
 
@@ -136,7 +140,7 @@ impl OpNode {
 
         self.left_child = Some(Box::new(left_node));
         self.right_child = Some(Box::new(right_node));
-        self.eval_permutation.reset();
+        self.reset_permuter();
     }
 
     /* 
@@ -146,7 +150,7 @@ impl OpNode {
      * in case of (x1 AND x2) OR x3, x1 AND x2 should form a cluster and x3 should form another
      * So exchanging x1<->x3 and x2<->x3 make sense, but x1<->x2 doesn't
      * 
-     * My current thought process is that NOT expression doesn't need permutations of input value
+     * NOT expression doesn't need permutations of input value
      * As we are exploring all possible NOT combinations as well
      * We have all possible boolean expressions with N variables
      * 
@@ -255,7 +259,7 @@ impl OpNode {
         if self.start_index == self.end_index {
             if self.operation == Op::None {
                 self.operation = Op::Not;
-                self.eval_permutation.reset();
+                self.reset_permuter();
                 return;
             }
             panic!("Leaf node exhausted next-gen");
@@ -266,7 +270,7 @@ impl OpNode {
         // Check if left_child can be restructured
         if self.left_child != None && self.left_child.as_ref().unwrap().has_next() {
             self.left_child.as_mut().unwrap().generate_next();
-            self.eval_permutation.reset();
+            self.reset_permuter();
             return;
         }
         
@@ -275,7 +279,7 @@ impl OpNode {
         if self.right_child != None && self.right_child.as_mut().unwrap().has_next() {
             self.right_child.as_mut().unwrap().generate_next();
             self.left_child.as_mut().unwrap().reset(self.start_index, self.split_index, true);
-            self.eval_permutation.reset();
+            self.reset_permuter();
             return;
         }
 
@@ -285,13 +289,13 @@ impl OpNode {
         if self.operation == Op::And {
             self.reset(self.start_index, self.end_index, false);
             self.operation = Op::Or;
-            self.eval_permutation.reset();
+            self.reset_permuter();
             return;
         }
 
         // In-order to avoid generating symmetric trees, we restructure till the middle element of array.
-        // All structures generated after are anyways handled by permuting input value array
-        if self.split_index + 1 > (self.end_index + 1)/2 {
+        // All structures generated after half are anyways handled by permuting input value array
+        if self.split_index >= (self.end_index + 1)/2 {
             panic!("All possible trees generated");
         }
 
@@ -308,7 +312,7 @@ impl OpNode {
         self.left_child = Some(Box::new(left_node));
         self.right_child = Some(Box::new(right_node));
 
-        self.eval_permutation.reset();
+        self.reset_permuter();
     }
 }
 
@@ -581,7 +585,7 @@ mod test {
         }
 
         // TODO: Verify
-        assert_eq!(counter, 64);
+        assert_eq!(counter, 32);
     }
 
     fn test_leaf_node(node: &mut OpNode, expected_index: usize) {
