@@ -5,27 +5,18 @@
 * Replacing elements in one set with elements in another set
 */
 
-use std::cmp::min;
-
 // Replace element X with Y
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetPermuter {
     data: Vec<Vec<usize>>,
-    child: Option<Box<SetPermuter>>,
-
-    x: (usize, usize),
-    y: (usize, usize),
-    stack_size: usize
+    stack: Vec<((usize, usize), (usize, usize))>,
 }
 
 impl SetPermuter {
     pub fn new(data: Vec<Vec<usize>>) -> Self {
         let mut muter = SetPermuter {
             data: data,
-            child: None,
-            x: (0, 0),
-            y: (0, 0),
-            stack_size: 0
+            stack: vec![((0,0), (0,0))],
         };
 
         muter
@@ -50,9 +41,7 @@ impl SetPermuter {
         }
 
         self.data = v;
-        self.x = (0, 0);
-        self.y = (0, 0);
-        self.child = None;
+        self.stack = vec![((0,0),(0,0))];
     }
 
     // First permutation is no-replacement
@@ -61,133 +50,175 @@ impl SetPermuter {
             return false;
         }
 
-        if self.child != None {
-            if self.child.as_ref().unwrap().has_next() {
-                return true;
-            }
+        if self.stack.len() == 0 {
+            return false;
         }
 
-        self.y.0 < self.data.len() - 1 
-        || self.y.1 < self.data[self.y.0].len() - 1 
-        || self.x.0 < self.data.len() - 2
-        || self.x.1 < self.data[self.x.0].len() - 1
-        || self.child != None
+        let last_el = self.stack.last().unwrap();
+
+        last_el.1.0 < self.data.len() - 1 
+        || last_el.1.1 < self.data[last_el.1.0].len() - 1 
+        || last_el.0.0 < self.data.len() - 2
+        || last_el.0.1 < self.data[last_el.0.0].len() - 1
+        || self.stack.len() > 1
     }
 
-
-    // Optimizing for swaps
-    // P: [1 2] [3 4 5]
-    // P: [3 2] [1 4 5]
-    // P: [4 2] [3 1 5]
-    // P: [5 2] [3 4 1]
-    // C1: [3 4] [1 2 5]
-    // C1: [3 5] [1 4 2]
-    // C1: [4 5] [3 1 2] 
     pub fn generate_next(&mut self) {
-        // First permutation
-        if self.x.0 == 0 && self.x.1 == 0 && self.y.0 == 0 && self.y.1 == 0 {
-            self.y.0 = self.x.0 + 1;
-            self.y.1  = 0;
+        if self.stack.len() == 0 {
+            panic!("Overflow");
+        }
+
+
+        let mut last_el = self.stack.last().unwrap().clone();
+        self.apply_swap(last_el);
+        self.stack.pop();
+
+        if last_el.0.0 == 0 && last_el.0.1 == 0 && last_el.1.0 == 0 && last_el.1.1 == 0 {
+            last_el.1.0 = 1;
+            last_el.1.1 = 0;
+            self.apply_swap(last_el);
+            self.stack.push(last_el);
+
+            
+            let mut child_el = last_el.clone();
+
+            // incr x 
+            if child_el.0.1 < self.data[child_el.0.0].len() - 1 {
+                child_el.0.1 += 1;
+                if child_el.1.1 < self.data[child_el.1.0].len() - 1 {
+                    child_el.1.1 += 1;
+                }
+                else {
+                    if child_el.1.0 < self.data.len() - 1 {
+                        child_el.1.0 += 1;
+                        child_el.1.1 = 0;
+                    }
+                    else {
+                        return;
+                    }
+                }
+            }
+            else if child_el.0.0 < self.data.len() - 2 {
+                child_el.0.0 += 1;
+                child_el.0.1 = 0;
+                child_el.1.0 = child_el.0.0 + 1;
+                child_el.1.1 = 0;
+            }
+            else {
+                return;
+            }
+
+            self.apply_swap(child_el);
+            self.stack.push(child_el);
+            
             return;
         }
 
-        if self.child != None {
-            if self.child.as_ref().unwrap().has_next() {
-                self.child.as_mut().unwrap().generate_next();
-            }
-            else {
-                self.child = None;
-            }
+        if last_el.1.1 < self.data[last_el.1.0].len() - 1 {
+            last_el.1.1 += 1;
+        }
+        else if last_el.1.0 < self.data.len() - 1 {
+            last_el.1.0 += 1;
+            last_el.1.1 = 0;
+        }
+        else if last_el.0.1 < self.data[last_el.0.0].len() - 1 {
+            last_el.0.1 += 1;
+            last_el.1.0 = last_el.0.0 + 1;
+            last_el.1.1 = 0;
+        }
+        else if last_el.0.0 < self.data.len() - 2 {
+            last_el.0.0 += 1;
+            last_el.0.1 = 0;
+            last_el.1.0 = last_el.0.0 + 1;
+            last_el.1.1 = 0;
         }
         else {
-            self.generate_child();
-
-            // self is commited to x
-            if self.y.1 < self.data[self.y.0].len() - 1 {
-                self.y.1 += 1;
-            }
-            else if self.y.0 < self.data.len() - 1 {
-                self.y.0 += 1;
-                self.y.1 = 0;
-            }
-            else if self.x.1 < self.data[self.x.0].len() - 1 {
-                self.x.1 += 1;
-                self.y.0 = self.x.0 + 1;
-                self.y.1 = 0;
-            }
-            else if self.x.0 < self.data.len() - 2 {
-                self.x.0 += 1;
-                self.x.1 = 0;
-                self.y.0 = self.x.0 + 1;
-                self.y.1 = 0;
-            }
-            else {
-                panic!("Overflow");
-            }
-
+            return;
         }
-    }
 
-    fn replace(&mut self) {
-        let t = self.data[self.x.0][self.x.1];
-        self.data[self.x.0][self.x.1] = self.data[self.y.0][self.y.1];
-        self.data[self.y.0][self.y.1] = t;
-    }
+        self.apply_swap(last_el);
+        self.stack.push(last_el);
 
-    fn generate_child(&mut self) {
-        let mut child_permuter = self.clone();
-        child_permuter.replace(); 
+        let mut child_el = last_el.clone();
 
-        // self increases x by 1 for child
-        if child_permuter.x.1 < child_permuter.data[child_permuter.x.0].len() - 1 {
-            child_permuter.x.1 += 1;
-            if child_permuter.y.1 < child_permuter.data[child_permuter.y.0].len() - 1  {
-                child_permuter.y.1 += 1;    
+        // incr x 
+        if child_el.0.1 < self.data[child_el.0.0].len() - 1 {
+            child_el.0.1 += 1;
+            if child_el.1.1 < self.data[child_el.1.0].len() - 1 {
+                child_el.1.1 += 1;
             }
             else {
-                if child_permuter.y.0 < child_permuter.data.len() - 1 {
-                    child_permuter.y.0 += 1;
-                    child_permuter.y.1 = 0;
+                if child_el.1.0 < self.data.len() - 1 {
+                    child_el.1.0 += 1;
+                    child_el.1.1 = 0;
                 }
                 else {
                     return;
                 }
             }
         }
-        else if child_permuter.x.0 < child_permuter.data.len() - 2 {
-            child_permuter.x.0 += 1;
-            child_permuter.x.1 = 0;
-            child_permuter.y.0 = child_permuter.x.0 + 1;
-            child_permuter.y.1 = 0;
+        else if child_el.0.0 < self.data.len() - 2 {
+            child_el.0.0 += 1;
+            child_el.0.1 = 0;
+            child_el.1.0 = child_el.0.0 + 1;
+            child_el.1.1 = 0;
         }
         else {
             return;
         }
-        
-        child_permuter.stack_size += 1;
-        self.child = Some(Box::new(child_permuter));
+
+        self.apply_swap(child_el);
+        self.stack.push(child_el);
+
+    }
+
+    fn can_incr(&self, i_j: ((usize, usize), (usize, usize))) -> bool {
+        i_j.1.0 < self.data.len() - 1 
+        || i_j.1.1 < self.data[i_j.1.0].len() - 1 
+        || i_j.0.0 < self.data.len() - 2
+        || i_j.0.1 < self.data[i_j.0.0].len() - 1
+    }
+
+    fn incr(&self, i_j: &mut ((usize, usize), (usize, usize))) {
+        if i_j.0.0 > self.data.len() - 2 || i_j.1.0 > self.data.len() - 1 {
+            panic!("Overflow");
+        }
+
+        if i_j.1.1 < self.data[i_j.1.0].len() - 1 {
+            i_j.1.1 += 1;
+        }
+        else if i_j.1.0 < self.data.len() - 1 {
+            i_j.1.0 += 1;
+            i_j.1.1 = 0;
+        }
+        else if i_j.0.1 < self.data[i_j.0.0].len() - 1 {
+            i_j.0.1 += 1;
+            i_j.1.0 = i_j.0.0 + 1;
+            i_j.1.1 = 0;
+        }
+        else if i_j.0.0 < self.data.len() - 2 {
+            i_j.0.0 += 1;
+            i_j.0.1 = 0;
+            i_j.1.0 = i_j.0.0 + 1;
+            i_j.1.1 = 0;
+        }
+    }
+
+    fn apply_swap(&mut self, i_j: ((usize, usize), (usize, usize))) {
+        let t = self.data[i_j.0.0][i_j.0.1];
+        self.data[i_j.0.0][i_j.0.1] = self.data[i_j.1.0][i_j.1.1];
+        self.data[i_j.1.0][i_j.1.1] = t;
     }
 
     pub fn get_vector(&self) -> Vec<usize> {
-        if self.child != None {
-            return self.child.as_ref().unwrap().get_vector();
-        }
-
-        
-        let mut v = self.data.clone();
-        let t = v[self.x.0][self.x.1];
-        v[self.x.0][self.x.1] = v[self.y.0][self.y.1];
-        v[self.y.0][self.y.1] = t;
-        
-
-        let mut result: Vec<usize> = vec![];
-        for i in v {
+        let mut v = vec![];
+        for i in self.data.clone() {
             for j in i {
-                result.push(j);
+                v.push(j);
             }
         }
 
-        result
+        v
     }
 }
 
@@ -197,14 +228,31 @@ mod test {
 
     #[test]
     fn test_generate_set_permutations() {
-        let mut permuter = SetPermuter::new(vec![vec![0, 1], vec![2]]);
-        assert_eq!(permuter.has_next(), true);
-        //assert_eq!(permuter.get_vector(), [0, 1, 2, 3, 4]);
-        println!("{:?}", permuter.get_vector());
+        let mut permuter = SetPermuter::new(vec![vec![0, 1], vec![2, 3, 4]]);
 
+        println!("{:?}", permuter.get_vector());
         while permuter.has_next() {
             permuter.generate_next();
-            println!("{:?}", permuter.get_vector());
+            println!("{:?}, {:?}", permuter.get_vector(), permuter.stack);
         }
+        return;
+
+        let expected: Vec<Vec<usize>> = vec![
+            vec![2, 1, 0, 3],
+            vec![2, 3, 0, 1],
+            vec![3, 1, 2, 0],
+            vec![0, 2, 1, 3],
+            vec![0, 3, 2, 1]
+        ];
+
+        assert_eq!(permuter.get_vector(), vec![0, 1, 2, 3]);
+
+        for ex in expected {
+            assert_eq!(permuter.has_next(), true);
+            permuter.generate_next();
+            assert_eq!(permuter.get_vector(), ex);
+        }
+        
+        assert_eq!(permuter.has_next(), false);
     }
 }

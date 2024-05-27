@@ -46,9 +46,9 @@ Following techniques has been applied to reduce search space:
 
 * We generating boolean expressions of N variables, would only generate half the tree. The other half is symmetric, and gets 
 handled by the permutation we apply to input variables. So for three variables, we generate from `(A AND B AND C)` to `(A AND (B OR C))`, we won't generate `((A OR B) AND C)`
-* Input variables are clustered if they share the same op next to each other. For ex. `(A AND (B AND C))` clusters `[A,B,C]`. `(A AND (B OR C))` clusters as `[[A,B],[C]]`. These are clustered as the variables can be changed with each other without affecting output for the expression, so no value in permuting on them.
-* We generate permutation of input variables based on clusters. So we generate `[[C,B],[A]]`, `[[A,C],[B]]` but not `[[B,A],C]`.
-* Since we generate all boolean expressions, for cases like `((A AND NOT B) OR C)`, even if we are not permuting (A, B), we will search for the rule `(( NOT A AND B) OR C)` as well
+* Input variables are clustered if they share the same op next to each other. For ex. `(A AND (B AND C))` clusters `[A,B,C]`. `(A AND (B OR C))` clusters as `[[A],[B,C]]`. These are clustered as the variables can be changed with each other without affecting output for the expression, so no value in permuting on them.
+* We generate permutation of input variables based on clusters. So we generate `[[B],[A,C]]`, `[[C],[B,A]]` but not `[[A],[C,B]]`.
+* Since we generate all boolean expressions, for cases like `(A AND (NOT B OR C))`, even if we are not permuting (A, B), we will search for the rule `(A AND (B OR NOT C))` as well
 * Not exploring rules with action "Unset", they are lame
 
 ## Current status
