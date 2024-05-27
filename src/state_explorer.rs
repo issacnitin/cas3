@@ -48,6 +48,8 @@ impl StateExplorer {
                     for el in self.expected_num_set_cells.clone() {
                         print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
                         println!("Exploring dimension {}", dim_len);
+                        println!("Explored {rule_counter} rules and {permutation_counter} permutations. The last one was: ");
+                        rule.print();
                         rule.debug_print();
                         space.debug_print();
                         if space.find_number_of_cells(CellValue::Set) != el {
@@ -89,11 +91,6 @@ impl StateExplorer {
 
                 if !rule.has_next() {
                     break;
-                }
-
-                if rule_counter % 1000 == 0 {
-                    println!("Explored {rule_counter} rules. The last one was: ");
-                    rule.print();
                 }
                 rule.generate_next();
             }

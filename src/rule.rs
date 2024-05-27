@@ -32,6 +32,11 @@ pub struct Rule {
 impl Rule {
     pub fn new(dim_len: usize) -> Self {
         Rule {
+            // 3 ain't a magic number
+            // for spacial dimension of any number
+            // there are 3^N surrounding cells (including not just neighbours)
+            // What if the rule in reality only considers it's neighbours ? If that's the case
+            // There's 2*N nodes only and we can potentially explore many more dimensions
             condition: OpNode::new(0, (3 as usize).pow(dim_len as u32) - 1),
             result: Action::Set
         }

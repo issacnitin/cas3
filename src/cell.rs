@@ -170,7 +170,7 @@ mod tests {
 
 
     #[test]
-    fn test_generate_combinations() {
+    fn test_generate_cell_combinations() {
         let mut cell = Cell::new(1);
 
         assert_eq!(*cell.get_coordinates(), vec![0]);
@@ -182,7 +182,8 @@ mod tests {
         cell.generate_next_unexplored_nearby_cell();
         assert_eq!(*cell.get_coordinates(), vec![0]);
         assert_eq!(cell.get_nearby_coordinate(), vec![-1]);
-        
+        assert_eq!(cell.has_unexplored_nearby_cell(), false);
+
         let mut two_d_cell = Cell::new(2);
         assert_eq!(*two_d_cell.get_coordinates(), vec![0, 0]);
         assert_eq!(two_d_cell.has_unexplored_nearby_cell(), true);
