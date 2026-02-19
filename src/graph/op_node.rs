@@ -46,7 +46,7 @@ impl OpNode {
         return node;
     }
 
-    fn reset_permuter(&mut self) {
+    pub fn reset_permuter(&mut self) {
         self.eval_permutation.reset(self.get_clustered_variables());
     }
 
