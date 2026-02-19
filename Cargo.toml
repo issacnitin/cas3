@@ -2,3 +2,6 @@
 name = "cellular_automata_state_search"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+rayon = "1.10"

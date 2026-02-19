@@ -1,5 +1,9 @@
 use std::io;
 use std::io::prelude::*;
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use rayon::prelude::*;
 
 use crate::cell::CellValue;
 use crate::cell::Cell;
@@ -28,41 +32,54 @@ impl StateExplorer {
     pub fn explore(&self) -> bool {
         // Explore all dimensions
         for dim_len in self.min_dimensions..self.max_dimensions+1 {
-            let mut rule = Rule::new(dim_len);
-            let mut rule_counter: u64 = 0;
-            let mut permutation_counter: u64 = 0;
             let num_neighbors = (3_usize).pow(dim_len as u32);
-            let mut truth_buf: Vec<bool> = Vec::with_capacity(num_neighbors);
-            let mut coord_buf: Vec<i32> = Vec::with_capacity(dim_len);
-            // Explore all rules of given dimension
-            loop {
-                rule_counter += 1;
-                // For all evaluation permutations 
+
+            // Pre-collect all rule variants (expression + action combos)
+            let mut all_rules: Vec<Rule> = vec![];
+            let mut rule = Rule::new(dim_len);
+            all_rules.push(rule.clone());
+            while rule.has_next() {
+                rule.generate_next();
+                all_rules.push(rule.clone());
+            }
+
+            let total_rules = all_rules.len();
+            println!("Dimension {}: searching {} rule expressions across all threads...", dim_len, total_rules);
+
+            let counter = AtomicU64::new(0);
+            let found_rule: Mutex<Option<Rule>> = Mutex::new(None);
+            let found_flag = AtomicBool::new(false);
+
+            // Parallel search: each thread takes a rule expression and iterates its permutations
+            all_rules.par_iter().for_each(|base_rule| {
+                if found_flag.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                let mut rule = base_rule.clone();
+                let mut truth_buf: Vec<bool> = Vec::with_capacity(num_neighbors);
+                let mut coord_buf: Vec<i32> = Vec::with_capacity(dim_len);
+
                 loop {
-                    permutation_counter += 1;
+                    if found_flag.load(Ordering::Relaxed) {
+                        return;
+                    }
+
+                    let cnt = counter.fetch_add(1, Ordering::Relaxed) + 1;
+
                     let mut space: Space = Space::new(dim_len);
                     space.set_rule(&rule);
-    
-                    let mut __cell: Cell = Cell::new(dim_len);
-                    __cell.set();
-                    space.push_cell(&__cell);
-    
+
+                    let mut init_cell: Cell = Cell::new(dim_len);
+                    init_cell.set();
+                    space.push_cell(&init_cell);
+
                     let mut all_matched: bool = true;
-                    let mut match_counter = 0;
                     for &el in self.expected_num_set_cells.iter() {
-                        if cfg!(debug_assertions) {
-                            print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
-                            println!("Exploring dimension {}", dim_len);
-                            println!("Explored {rule_counter} rules and {permutation_counter} permutations. The last one was: ");
-                            rule.print();
-                            rule.debug_print();
-                            space.debug_print();
-                        }
                         if space.get_set_count() != el {
                             all_matched = false;
                             break;
                         }
-                        match_counter += 1;
                         space.generate_next_iteration();
                         let mut modified_cells: Vec<Cell> = Vec::with_capacity(space.len());
                         for _cell in space.cells.iter() {
@@ -73,28 +90,17 @@ impl StateExplorer {
                         for c in modified_cells.iter() {
                             space.push_cell(c);
                         }
-    
-                        if cfg!(debug_assertions) {
-                            println!("Matched {} elements.", match_counter);
-                        }
                     }
-    
-                    if cfg!(debug_assertions) {
-                        println!("\tDone exploring rule {}", rule_counter);
-                    }
-                    
+
                     if all_matched {
-                        println!("All elements matched for rule");
-                        rule.print();
-
-                        if !cfg!(test) {
-                            self.emulate_rule_on_user_input(&rule, dim_len);
-                        }
-                        return true;
+                        found_flag.store(true, Ordering::Relaxed);
+                        let mut guard = found_rule.lock().unwrap();
+                        *guard = Some(rule.clone());
+                        return;
                     }
 
-                    if !cfg!(debug_assertions) && permutation_counter % 100000 == 0 {
-                        println!("Dimension {}: explored {} rules, {} permutations", dim_len, rule_counter, permutation_counter);
+                    if !cfg!(debug_assertions) && cnt % 100000 == 0 {
+                        println!("Dimension {}: explored {} permutations so far", dim_len, cnt);
                     }
 
                     if !rule.has_next_eval_permutation() {
@@ -102,18 +108,24 @@ impl StateExplorer {
                     }
                     rule.generate_next_eval_permutation();
                 }
+            });
 
-                if !rule.has_next() {
-                    break;
+            let result = found_rule.lock().unwrap().take();
+            if let Some(matched_rule) = result {
+                println!("All elements matched for rule");
+                matched_rule.print();
+                if !cfg!(test) {
+                    self.emulate_rule_on_user_input(&matched_rule, dim_len);
                 }
-                rule.generate_next();
+                return true;
             }
 
-            println!("Done exploring dimension {}, explored {} rules and {} permutations", dim_len, rule_counter, permutation_counter);
+            let total_checked = counter.load(Ordering::Relaxed);
+            println!("Done exploring dimension {}, explored {} rules and {} permutations", dim_len, total_rules, total_checked);
         }
 
         println!("Found no rule with dimensions between {} and {} that can generate sequence {:?}", self.min_dimensions, self.max_dimensions, self.expected_num_set_cells);
-        
+
         false
     }
 
@@ -221,94 +233,121 @@ impl StateExplorer {
         for dim_len in self.min_dimensions..=self.max_dimensions {
             let num_neighbors = (3_usize).pow(dim_len as u32);
             let end_index = num_neighbors - 1;
-            let mut truth_buf: Vec<bool> = Vec::with_capacity(num_neighbors);
-            let mut coord_buf: Vec<i32> = Vec::with_capacity(dim_len);
-            let mut counter: u64 = 0;
 
-            let mut rule_set = RuleSet::new(dim_len);
-
-            // Iterate all birth condition expressions
-            loop {
-                // For each birth expression, iterate all survival expressions
-                loop {
-                    // For each (birth, survival) expression pair, iterate birth permutations
-                    loop {
-                        // For each birth permutation, iterate survival permutations
-                        loop {
-                            counter += 1;
-
-                            // Simulate the cellular automaton
-                            let mut space = Space::new(dim_len);
-                            let mut init_cell = Cell::new(dim_len);
-                            init_cell.set();
-                            space.push_cell(&init_cell);
-
-                            let mut all_matched = true;
-                            for &el in self.expected_num_set_cells.iter() {
-                                if space.get_set_count() != el {
-                                    all_matched = false;
-                                    break;
-                                }
-                                space.generate_next_iteration();
-                                let mut modified_cells: Vec<Cell> = Vec::with_capacity(space.len());
-                                for existing_cell in space.cells.iter() {
-                                    let mut c = existing_cell.clone();
-                                    Self::apply_rule_set(&rule_set, &mut c, &space, &mut truth_buf, &mut coord_buf);
-                                    modified_cells.push(c);
-                                }
-                                for c in modified_cells.iter() {
-                                    space.push_cell(c);
-                                }
-                            }
-
-                            if all_matched {
-                                println!("Found matching rule set!");
-                                rule_set.print();
-                                if !cfg!(test) {
-                                    self.emulate_rule_set_on_user_input(&rule_set, dim_len);
-                                }
-                                return true;
-                            }
-
-                            if !cfg!(debug_assertions) && counter % 500000 == 0 {
-                                println!("Dimension {}: explored {} rule set combinations", dim_len, counter);
-                            }
-
-                            // Advance survival permutation
-                            if !rule_set.survival_condition.has_next_eval_permutation() {
-                                break;
-                            }
-                            rule_set.survival_condition.generate_next_eval_permutation();
-                        }
-                        // Reset survival permutation for next birth permutation
-                        rule_set.survival_condition.reset_permuter();
-
-                        // Advance birth permutation
-                        if !rule_set.birth_condition.has_next_eval_permutation() {
-                            break;
-                        }
-                        rule_set.birth_condition.generate_next_eval_permutation();
-                    }
-                    // Reset birth permutation
-                    rule_set.birth_condition.reset_permuter();
-
-                    // Advance survival expression (generate_next resets its permuter)
-                    if !rule_set.survival_condition.has_next() {
-                        break;
-                    }
-                    rule_set.survival_condition.generate_next();
-                }
-                // Reset survival condition to initial state
-                rule_set.survival_condition = OpNode::new(0, end_index);
-
-                // Advance birth expression (generate_next resets its permuter)
-                if !rule_set.birth_condition.has_next() {
-                    break;
-                }
-                rule_set.birth_condition.generate_next();
+            // Pre-collect all distinct expression variants (shared by birth & survival)
+            let mut all_exprs: Vec<OpNode> = vec![];
+            let mut expr = OpNode::new(0, end_index);
+            all_exprs.push(expr.clone());
+            while expr.has_next() {
+                expr.generate_next();
+                all_exprs.push(expr.clone());
             }
 
-            println!("Done exploring dimension {} with rule sets: {} combinations checked", dim_len, counter);
+            let num_exprs = all_exprs.len();
+            // Build cartesian product indices: (birth_expr_idx, survival_expr_idx)
+            let pairs: Vec<(usize, usize)> = (0..num_exprs)
+                .flat_map(|b| (0..num_exprs).map(move |s| (b, s)))
+                .collect();
+
+            let total_pairs = pairs.len();
+            println!("Dimension {}: searching {} expression pairs ({} x {}) across all threads...",
+                dim_len, total_pairs, num_exprs, num_exprs);
+
+            let counter = AtomicU64::new(0);
+            let found_flag = AtomicBool::new(false);
+            let found_rule_set: Mutex<Option<RuleSet>> = Mutex::new(None);
+
+            // Parallel search over (birth_expr, survival_expr) pairs
+            pairs.par_iter().for_each(|&(b_idx, s_idx)| {
+                if found_flag.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                let mut rule_set = RuleSet {
+                    birth_condition: all_exprs[b_idx].clone(),
+                    survival_condition: all_exprs[s_idx].clone(),
+                };
+
+                let mut truth_buf: Vec<bool> = Vec::with_capacity(num_neighbors);
+                let mut coord_buf: Vec<i32> = Vec::with_capacity(dim_len);
+
+                // Iterate all birth permutations
+                loop {
+                    if found_flag.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // Iterate all survival permutations
+                    loop {
+                        if found_flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+
+                        let cnt = counter.fetch_add(1, Ordering::Relaxed) + 1;
+
+                        // Simulate the cellular automaton
+                        let mut space = Space::new(dim_len);
+                        let mut init_cell = Cell::new(dim_len);
+                        init_cell.set();
+                        space.push_cell(&init_cell);
+
+                        let mut all_matched = true;
+                        for &el in self.expected_num_set_cells.iter() {
+                            if space.get_set_count() != el {
+                                all_matched = false;
+                                break;
+                            }
+                            space.generate_next_iteration();
+                            let mut modified_cells: Vec<Cell> = Vec::with_capacity(space.len());
+                            for existing_cell in space.cells.iter() {
+                                let mut c = existing_cell.clone();
+                                Self::apply_rule_set(&rule_set, &mut c, &space, &mut truth_buf, &mut coord_buf);
+                                modified_cells.push(c);
+                            }
+                            for c in modified_cells.iter() {
+                                space.push_cell(c);
+                            }
+                        }
+
+                        if all_matched {
+                            found_flag.store(true, Ordering::Relaxed);
+                            let mut guard = found_rule_set.lock().unwrap();
+                            *guard = Some(rule_set.clone());
+                            return;
+                        }
+
+                        if !cfg!(debug_assertions) && cnt % 500000 == 0 {
+                            println!("Dimension {}: explored {} rule set combinations", dim_len, cnt);
+                        }
+
+                        // Advance survival permutation
+                        if !rule_set.survival_condition.has_next_eval_permutation() {
+                            break;
+                        }
+                        rule_set.survival_condition.generate_next_eval_permutation();
+                    }
+                    // Reset survival permutation for next birth permutation
+                    rule_set.survival_condition.reset_permuter();
+
+                    // Advance birth permutation
+                    if !rule_set.birth_condition.has_next_eval_permutation() {
+                        break;
+                    }
+                    rule_set.birth_condition.generate_next_eval_permutation();
+                }
+            });
+
+            let result = found_rule_set.lock().unwrap().take();
+            if let Some(matched_rule_set) = result {
+                println!("Found matching rule set!");
+                matched_rule_set.print();
+                if !cfg!(test) {
+                    self.emulate_rule_set_on_user_input(&matched_rule_set, dim_len);
+                }
+                return true;
+            }
+
+            let total_checked = counter.load(Ordering::Relaxed);
+            println!("Done exploring dimension {} with rule sets: {} combinations checked", dim_len, total_checked);
         }
 
         println!("Found no rule set with dimensions between {} and {} that can generate sequence {:?}",
