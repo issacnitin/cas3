@@ -58,10 +58,14 @@ impl StateExplorer {
                         }
                         match_counter += 1;
                         space.generate_next_iteration();
-                        for _cell in space.cells.clone().iter() {
+                        let mut modified_cells: Vec<Cell> = vec![];
+                        for _cell in space.cells.iter() {
                             let mut c = _cell.clone();
                             StateExplorer::apply_rule_if_applicable(&rule, &mut c, &space);
-                            space.push_cell(&c);
+                            modified_cells.push(c);
+                        }
+                        for c in modified_cells.iter() {
+                            space.push_cell(c);
                         }
     
                         if cfg!(debug_assertions) {
@@ -131,10 +135,14 @@ impl StateExplorer {
             // Read a single byte and discard
             let _ = stdin.read(&mut [0u8]).unwrap();
 
-            for cell in space.cells.clone().iter() {
+            let mut modified_cells: Vec<Cell> = vec![];
+            for cell in space.cells.iter() {
                 let mut _cell = cell.clone();
                 StateExplorer::apply_rule_if_applicable(rule, &mut _cell, &space);
-                space.push_cell(&_cell);
+                modified_cells.push(_cell);
+            }
+            for c in modified_cells.iter() {
+                space.push_cell(c);
             }
         }
     }
@@ -202,6 +210,7 @@ impl StateExplorer {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

@@ -222,6 +222,7 @@ impl SetPermuter {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

@@ -137,7 +137,7 @@ impl Space {
         let found_cell: Option<&mut Cell> = self.search_cells_mut(cell.get_coordinates());
         if found_cell == None {
             self.cells.push(cell.clone());
-            self.cell_hashes.insert(CellHash(self.cells.len()-1, cell.get_hash()));;
+            self.cell_hashes.insert(CellHash(self.cells.len()-1, cell.get_hash()));
         }
         else {
             found_cell.unwrap().set_value(cell.get_value());
@@ -155,10 +155,10 @@ impl Space {
         self.cells.len()
     }
 
-    pub fn find_number_of_cells(&self, expectedValue: CellValue) -> usize {
+    pub fn find_number_of_cells(&self, expected_value: CellValue) -> usize {
         let mut count = 0;
-        for cell in self.cells.to_vec() {
-            if cell.get_value() == expectedValue {
+        for cell in self.cells.iter() {
+            if cell.get_value() == expected_value {
                 count += 1;
             }
         }
@@ -227,6 +227,7 @@ impl Space {
 
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

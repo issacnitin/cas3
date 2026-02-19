@@ -101,6 +101,7 @@ impl VectorPermuter {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::VectorPermuter;
 

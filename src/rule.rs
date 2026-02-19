@@ -12,9 +12,7 @@
 * along with result (Set/Unset/Flip current cell)
 */
 
-use crate::space::Space;
 use crate::graph::op_node::OpNode;
-use crate::cell::{Cell, CellValue};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Action {

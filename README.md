@@ -9,7 +9,7 @@ This project is not computationaly feasible, and is hence a learning project. Co
 I found it generating rules for sequence such as :
 <br/>1,2,3,4..
 <br/>1,3,5,7..
-<br/>1,4,9,25,36..
+<br/>1,4,9,16,25,36..
 <br/>The most interesting I've found has been 1, 3, 5, 9, 11, 15, 19, 27
 
 ![](./example.gif)

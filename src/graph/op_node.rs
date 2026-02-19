@@ -1,4 +1,4 @@
-use crate::permutation::{set_permuter::SetPermuter, vector_permuter::VectorPermuter};
+use crate::permutation::set_permuter::SetPermuter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -113,7 +113,7 @@ impl OpNode {
         (self.left_child != None && self.left_child.as_ref().unwrap().has_next())
         || (self.right_child != None && self.right_child.as_ref().unwrap().has_next())
         || self.operation == Op::And
-        || self.split_index < (self.end_index + 1)/2 - 1
+        || self.split_index < self.start_index + (self.end_index - self.start_index + 1) / 2 - 1
     }
 
     fn reset(&mut self, start_index: usize, end_index: usize, reset_split: bool) {  
@@ -295,7 +295,7 @@ impl OpNode {
 
         // In-order to avoid generating symmetric trees, we restructure till the middle element of array.
         // All structures generated after half are anyways handled by permuting input value array
-        if self.split_index >= (self.end_index + 1)/2 {
+        if self.split_index >= self.start_index + (self.end_index - self.start_index + 1) / 2 {
             panic!("All possible trees generated");
         }
 
@@ -316,6 +316,7 @@ impl OpNode {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 
