@@ -27,14 +27,16 @@ impl StateExplorer {
         // Explore all dimensions
         for dim_len in self.min_dimensions..self.max_dimensions+1 {
             let mut rule = Rule::new(dim_len);
-            let mut rule_counter = 0;
-            let mut permutation_counter = 0;
+            let mut rule_counter: u64 = 0;
+            let mut permutation_counter: u64 = 0;
+            let num_neighbors = (3_usize).pow(dim_len as u32);
+            let mut truth_buf: Vec<bool> = Vec::with_capacity(num_neighbors);
+            let mut coord_buf: Vec<i32> = Vec::with_capacity(dim_len);
             // Explore all rules of given dimension
             loop {
                 rule_counter += 1;
                 // For all evaluation permutations 
                 loop {
-                    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
                     permutation_counter += 1;
                     let mut space: Space = Space::new(dim_len);
                     space.set_rule(&rule);
@@ -45,23 +47,25 @@ impl StateExplorer {
     
                     let mut all_matched: bool = true;
                     let mut match_counter = 0;
-                    for el in self.expected_num_set_cells.clone() {
-                        print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
-                        println!("Exploring dimension {}", dim_len);
-                        println!("Explored {rule_counter} rules and {permutation_counter} permutations. The last one was: ");
-                        rule.print();
-                        rule.debug_print();
-                        space.debug_print();
-                        if space.find_number_of_cells(CellValue::Set) != el {
+                    for &el in self.expected_num_set_cells.iter() {
+                        if cfg!(debug_assertions) {
+                            print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+                            println!("Exploring dimension {}", dim_len);
+                            println!("Explored {rule_counter} rules and {permutation_counter} permutations. The last one was: ");
+                            rule.print();
+                            rule.debug_print();
+                            space.debug_print();
+                        }
+                        if space.get_set_count() != el {
                             all_matched = false;
                             break;
                         }
                         match_counter += 1;
                         space.generate_next_iteration();
-                        let mut modified_cells: Vec<Cell> = vec![];
+                        let mut modified_cells: Vec<Cell> = Vec::with_capacity(space.len());
                         for _cell in space.cells.iter() {
                             let mut c = _cell.clone();
-                            StateExplorer::apply_rule_if_applicable(&rule, &mut c, &space);
+                            StateExplorer::apply_rule_if_applicable(&rule, &mut c, &space, &mut truth_buf, &mut coord_buf);
                             modified_cells.push(c);
                         }
                         for c in modified_cells.iter() {
@@ -85,6 +89,10 @@ impl StateExplorer {
                             self.emulate_rule_on_user_input(&rule, dim_len);
                         }
                         return true;
+                    }
+
+                    if !cfg!(debug_assertions) && permutation_counter % 100000 == 0 {
+                        println!("Dimension {}: explored {} rules, {} permutations", dim_len, rule_counter, permutation_counter);
                     }
 
                     if !rule.has_next_eval_permutation() {
@@ -117,6 +125,9 @@ impl StateExplorer {
         space.set_rule(rule);
         space.push_cell(&cell);
 
+        let mut truth_buf: Vec<bool> = Vec::with_capacity((3_usize).pow(dim_len as u32));
+        let mut coord_buf: Vec<i32> = Vec::with_capacity(dim_len);
+
         let mut iter_counter = 1;
 
         loop {
@@ -138,7 +149,7 @@ impl StateExplorer {
             let mut modified_cells: Vec<Cell> = vec![];
             for cell in space.cells.iter() {
                 let mut _cell = cell.clone();
-                StateExplorer::apply_rule_if_applicable(rule, &mut _cell, &space);
+                StateExplorer::apply_rule_if_applicable(rule, &mut _cell, &space, &mut truth_buf, &mut coord_buf);
                 modified_cells.push(_cell);
             }
             for c in modified_cells.iter() {
@@ -147,8 +158,8 @@ impl StateExplorer {
         }
     }
 
-    pub fn apply_rule_if_applicable(rule: &Rule, cell: &mut Cell, space: &Space) {
-        if StateExplorer::is_rule_applicable(rule, cell, space) {
+    pub fn apply_rule_if_applicable(rule: &Rule, cell: &mut Cell, space: &Space, truth_buf: &mut Vec<bool>, coord_buf: &mut Vec<i32>) {
+        if StateExplorer::is_rule_applicable(rule, cell, space, truth_buf, coord_buf) {
             StateExplorer::apply_rule(rule, cell);
         }
     }
@@ -165,48 +176,26 @@ impl StateExplorer {
         }
     }
 
-    fn is_rule_applicable(rule: &Rule, cell: &mut Cell, space: &Space) -> bool {
+    fn is_rule_applicable(rule: &Rule, cell: &mut Cell, space: &Space, v: &mut Vec<bool>, coord_buf: &mut Vec<i32>) -> bool {
         // Always reset before applying rules
         cell.reset_explore();
 
         // truth values to be applied to condition
-        let mut v: Vec<bool> = vec![];
+        v.clear();
         
-        let cell_coordinates: Vec<i32> = cell.get_nearby_coordinate();
-        let cell_in_space = space.search_cells(&cell_coordinates);
-        if cell_in_space == None {
-            // Cell unset
-            v.push(false);
-        }
-        else {
-            if cell_in_space.unwrap().get_value() == CellValue::Set {
-                v.push(true);
-            }
-            else {
-                v.push(false);
-            }
-        }
+        cell.get_nearby_coordinate_buf(coord_buf);
+        let cell_in_space = space.search_cells(coord_buf);
+        v.push(matches!(cell_in_space, Some(c) if c.get_value() == CellValue::Set));
 
         while cell.has_unexplored_nearby_cell() {
             cell.generate_next_unexplored_nearby_cell();
-            let cell_coordinates: Vec<i32> = cell.get_nearby_coordinate();
+            cell.get_nearby_coordinate_buf(coord_buf);
             
-            let cell_in_space = space.search_cells(&cell_coordinates);
-            if cell_in_space == None {
-                // Cell unset
-                v.push(false);
-            }
-            else {
-                if cell_in_space.unwrap().get_value() == CellValue::Set {
-                    v.push(true);
-                }
-                else {
-                    v.push(false);
-                }
-            }
+            let cell_in_space = space.search_cells(coord_buf);
+            v.push(matches!(cell_in_space, Some(c) if c.get_value() == CellValue::Set));
         }
 
-        return rule.evaluate(&v);
+        return rule.evaluate(v);
     }
 }
 

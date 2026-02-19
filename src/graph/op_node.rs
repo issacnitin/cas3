@@ -202,8 +202,8 @@ impl OpNode {
     }
 
     // value has corresponding (T/F)
-    pub fn evaluate(&self, values: &Vec<bool>, apply_permutation_at_current_level: bool) -> bool {
-        if values.len() == 0 {
+    pub fn evaluate(&self, values: &[bool], apply_permutation_at_current_level: bool) -> bool {
+        if values.is_empty() {
             panic!("Invalid input");
         }
         
@@ -211,47 +211,40 @@ impl OpNode {
             panic!("Start Index {}, End Index {}, greater than passed in vector of length {}", self.start_index, self.end_index, values.len());
         }
 
-
-        let evaluation_values: &Vec<bool>;
-        let mut permuted_values: Vec<bool> = vec![];
-
         if apply_permutation_at_current_level {
-            // Apply permutation
-            // WARN: memory leak, avoid clone?
-            let v = self.eval_permutation.get_vector();
-            for ii in v {
-                permuted_values.push(values[ii]);
-            }
-
-            evaluation_values = &permuted_values;
-        }
-        else {
-            evaluation_values = values;
+            let perm = self.eval_permutation.get_vector();
+            let permuted: Vec<bool> = perm.iter().map(|&i| values[i]).collect();
+            return self.evaluate_inner(&permuted);
         }
 
+        self.evaluate_inner(values)
+    }
+
+    fn evaluate_inner(&self, values: &[bool]) -> bool {
         // Leaf node
         if self.start_index == self.end_index {
             if self.operation == Op::None {
-                return evaluation_values[self.start_index];
+                return values[self.start_index];
             }
             else if self.operation == Op::Not {
-                return !evaluation_values[self.start_index];
+                return !values[self.start_index];
             }
-            panic!("Invalid input");
+            panic!("Invalid operation on leaf node");
         }
 
-        // Parent node
-        let left_eval = self.left_child.as_ref().unwrap().evaluate(&evaluation_values, false);
-        let right_eval = self.right_child.as_ref().unwrap().evaluate(&evaluation_values, false);
+        // Parent node - short-circuit evaluation
+        let left_eval = self.left_child.as_ref().unwrap().evaluate_inner(values);
         
         if self.operation == Op::And {
-            return left_eval && right_eval;
+            if !left_eval { return false; }
+            return self.right_child.as_ref().unwrap().evaluate_inner(values);
         }
         else if self.operation == Op::Or {
-            return left_eval || right_eval;
+            if left_eval { return true; }
+            return self.right_child.as_ref().unwrap().evaluate_inner(values);
         }
         
-        panic!("Invalid input");
+        panic!("Invalid operation on parent node");
     }
 
     pub fn generate_next(&mut self) {

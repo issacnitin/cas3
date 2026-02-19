@@ -103,12 +103,10 @@ impl Cell {
 
     // Goes from SameCoordinate -> Positive -> Negative
     pub fn generate_next_unexplored_nearby_cell(&mut self) {
-
         let mut it: usize = 0;
-        let mut new_vec = self.delta_coordinate.clone();
 
-        while it < new_vec.len() && new_vec[it] == DeltaCoordinate::Negative {
-            new_vec[it] = DeltaCoordinate::SameCoordinate;
+        while it < self.delta_coordinate.len() && self.delta_coordinate[it] == DeltaCoordinate::Negative {
+            self.delta_coordinate[it] = DeltaCoordinate::SameCoordinate;
             it += 1;
         }
 
@@ -116,19 +114,31 @@ impl Cell {
             panic!("Overflow");
         }
         
-        if new_vec[it] == DeltaCoordinate::SameCoordinate {
-            new_vec[it] = DeltaCoordinate::Positive;
+        if self.delta_coordinate[it] == DeltaCoordinate::SameCoordinate {
+            self.delta_coordinate[it] = DeltaCoordinate::Positive;
         }
-        else if new_vec[it] == DeltaCoordinate::Positive {
-            new_vec[it] = DeltaCoordinate::Negative;
+        else if self.delta_coordinate[it] == DeltaCoordinate::Positive {
+            self.delta_coordinate[it] = DeltaCoordinate::Negative;
         }
-        
-        self.delta_coordinate = new_vec;
     }
 
     pub fn reset_explore(&mut self) {
-        self.delta_coordinate = vec![DeltaCoordinate::SameCoordinate; self.delta_coordinate.len()];
-    }   
+        for d in self.delta_coordinate.iter_mut() {
+            *d = DeltaCoordinate::SameCoordinate;
+        }
+    }
+
+    pub fn get_nearby_coordinate_buf(&self, buf: &mut Vec<i32>) {
+        buf.clear();
+        buf.extend_from_slice(&self.coordinates);
+        for (i, delta) in self.delta_coordinate.iter().enumerate() {
+            match delta {
+                DeltaCoordinate::Positive => buf[i] += 1,
+                DeltaCoordinate::Negative => buf[i] -= 1,
+                DeltaCoordinate::SameCoordinate => {}
+            }
+        }
+    }
 }  
 
 

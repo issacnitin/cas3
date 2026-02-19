@@ -10,6 +10,7 @@
 pub struct SetPermuter {
     data: Vec<Vec<usize>>,
     stack: Vec<((usize, usize), (usize, usize))>,
+    cached_vector: Vec<usize>,
 }
 
 impl SetPermuter {
@@ -17,9 +18,17 @@ impl SetPermuter {
         let mut muter = SetPermuter {
             data: data,
             stack: vec![((0,0), (0,0))],
+            cached_vector: vec![],
         };
-
+        muter.rebuild_cache();
         muter
+    }
+
+    fn rebuild_cache(&mut self) {
+        self.cached_vector.clear();
+        for set in &self.data {
+            self.cached_vector.extend_from_slice(set);
+        }
     }
 
     pub fn reset(&mut self, data: Vec<Vec<usize>>) {
@@ -42,6 +51,7 @@ impl SetPermuter {
 
         self.data = v;
         self.stack = vec![((0,0),(0,0))];
+        self.rebuild_cache();
     }
 
     // First permutation is no-replacement
@@ -64,6 +74,11 @@ impl SetPermuter {
     }
 
     pub fn generate_next(&mut self) {
+        self.generate_next_impl();
+        self.rebuild_cache();
+    }
+
+    fn generate_next_impl(&mut self) {
         if self.stack.len() == 0 {
             panic!("Overflow");
         }
@@ -210,15 +225,8 @@ impl SetPermuter {
         self.data[i_j.1.0][i_j.1.1] = t;
     }
 
-    pub fn get_vector(&self) -> Vec<usize> {
-        let mut v = vec![];
-        for i in self.data.clone() {
-            for j in i {
-                v.push(j);
-            }
-        }
-
-        v
+    pub fn get_vector(&self) -> &[usize] {
+        &self.cached_vector
     }
 }
 

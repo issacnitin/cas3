@@ -32,7 +32,8 @@ pub struct Space {
     pub cells: Vec<Cell>,
     // cell index, hash
     cell_hashes: HashSet<CellHash>,
-    rule: Rule
+    rule: Rule,
+    set_count: usize
 }
 
 
@@ -43,7 +44,8 @@ impl Space {
             dimension: dim_len,
             cells: vec![Cell::new(dim_len); 0],
             rule: Rule::new(dim_len),
-            cell_hashes: HashSet::new()
+            cell_hashes: HashSet::new(),
+            set_count: 0
         }
     }
 
@@ -134,21 +136,41 @@ impl Space {
     }
 
     pub fn push_cell(&mut self, cell: &Cell) {
+        let new_value = cell.get_value();
         let found_cell: Option<&mut Cell> = self.search_cells_mut(cell.get_coordinates());
         if found_cell == None {
+            if new_value == CellValue::Set {
+                self.set_count += 1;
+            }
             self.cells.push(cell.clone());
             self.cell_hashes.insert(CellHash(self.cells.len()-1, cell.get_hash()));
         }
         else {
-            found_cell.unwrap().set_value(cell.get_value());
+            let existing = found_cell.unwrap();
+            let old_value = existing.get_value();
+            existing.set_value(new_value);
+            if old_value != new_value {
+                if new_value == CellValue::Set {
+                    self.set_count += 1;
+                } else {
+                    self.set_count -= 1;
+                }
+            }
         }
     }
 
     pub fn pop_cell(&mut self) {
         let popped_cell = self.cells.pop();
-        if popped_cell != None {
-            self.cell_hashes.remove(&CellHash(self.cells.len(), popped_cell.unwrap().get_hash()));
+        if let Some(cell) = popped_cell {
+            if cell.get_value() == CellValue::Set {
+                self.set_count -= 1;
+            }
+            self.cell_hashes.remove(&CellHash(self.cells.len(), cell.get_hash()));
         }
+    }
+
+    pub fn get_set_count(&self) -> usize {
+        self.set_count
     }
 
     pub fn len(&self) -> usize {

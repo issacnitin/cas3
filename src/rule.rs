@@ -80,7 +80,7 @@ impl Rule {
         self.condition.generate_next();
     }
 
-    pub fn evaluate(&self, v: &Vec<bool>) -> bool {
+    pub fn evaluate(&self, v: &[bool]) -> bool {
         self.condition.evaluate(v, true)
     }
 }
