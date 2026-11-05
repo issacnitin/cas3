@@ -5,6 +5,7 @@ mod rule_set;
 mod state_explorer;
 mod graph;
 mod permutation;
+mod lattice;
 use crate::state_explorer::StateExplorer;
 
 fn main() {
