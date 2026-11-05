@@ -117,18 +117,6 @@ impl Neighbourhood {
             .unwrap_or(0)
     }
 
-    pub fn describe(&self) -> String {
-        let parts: Vec<String> = self
-            .offsets
-            .iter()
-            .map(|o| {
-                let coords: Vec<String> = o.iter().map(|x| format!("{:+}", x)).collect();
-                format!("({})", coords.join(","))
-            })
-            .collect();
-        parts.join(" ")
-    }
-
     /// The sub-neighbourhood made of the offsets at `indices`.
     pub fn select(&self, indices: &[usize]) -> Result<Self, String> {
         Neighbourhood::new(self.dim, indices.iter().map(|&i| self.offsets[i].clone()).collect())
@@ -194,6 +182,7 @@ impl Lattice {
         }
     }
 
+    #[cfg(test)]
     pub fn decode(&self, cell: i64) -> Vec<i32> {
         let mut out = vec![0; self.dim];
         self.decode_into(cell, &mut out);
@@ -218,13 +207,6 @@ pub struct GroupElement {
 }
 
 impl GroupElement {
-    pub fn identity(dim: usize) -> Self {
-        GroupElement {
-            perm: (0..dim).collect(),
-            sign: vec![1; dim],
-        }
-    }
-
     pub fn is_identity(&self) -> bool {
         self.sign.iter().all(|&s| s == 1) && self.perm.iter().enumerate().all(|(i, &p)| i == p)
     }

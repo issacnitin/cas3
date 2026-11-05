@@ -114,8 +114,6 @@ pub struct SearchReport {
     pub stored: Vec<Solution>,
     /// Deepest time step reached; deepest + 1 is the longest matched prefix of the target.
     pub deepest: usize,
-    /// Number of table entries in the unrestricted rule space (the log2 of its size).
-    pub total_entries: u64,
     pub elapsed: Duration,
 }
 
@@ -785,7 +783,6 @@ pub fn search(params: &SearchParams) -> Result<SearchReport, String> {
         weighted: stats.weighted,
         stored,
         deepest,
-        total_entries: ctx.total_entries,
         elapsed: started.elapsed(),
     };
     if let Some(progress) = &ctx.progress {
@@ -1034,6 +1031,23 @@ mod test {
     }
 
     #[test]
+    #[ignore = "enumerates all 2^31 rules of the planar von Neumann class; run with --ignored in release mode"]
+    fn exhaustive_planar_von_neumann_class_matches_search() {
+        use rayon::prelude::*;
+        let nb = Neighbourhood::von_neumann(2).unwrap();
+        for target in [vec![1, 2, 3, 5], vec![1, 2, 3, 5, 7]] {
+            let grid = Grid::new(&nb, target.len() - 1);
+            let brute = (0..(1u64 << 31))
+                .into_par_iter()
+                .filter(|&bits| grid.matches(&BitRule { k: 4, bits, mode: SurvivalMode::Free }, &target))
+                .count() as u128;
+            let report = run(&nb, &target, SurvivalMode::Free, true, true);
+            assert_eq!(report.exact_rule_count().unwrap(), brute, "{:?}", target);
+            println!("{:?}: {} of 2^31 rules match", target, brute);
+        }
+    }
+
+    #[test]
     fn grid_oracle_agrees_with_reference_simulator() {
         let nb = Neighbourhood::new(2, vec![vec![1, 0], vec![0, 1], vec![1, 1]]).unwrap();
         let grid = Grid::new(&nb, 6);
@@ -1135,7 +1149,7 @@ mod test {
         let nb = Neighbourhood::moore(2, 1).unwrap();
         let target = vec![1, 2, 3, 5, 7];
         let unbounded = run(&nb, &target, SurvivalMode::Free, true, false);
-        let total = unbounded.total_entries;
+        let total = SearchReport::space_bits(nb.len(), SurvivalMode::Free);
         for bound in [16u64, 18, 20, 24, 40] {
             let mut params = SearchParams::new(nb.clone(), target.clone());
             params.parallel = false;

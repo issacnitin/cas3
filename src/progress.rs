@@ -23,6 +23,13 @@ struct Inner {
     summary: String,
     target: Vec<usize>,
     nodes_by_depth: Vec<u64>,
+    /// Nodes of all searches that already finished (profile and scan run many searches).
+    nodes_before: u64,
+    solutions_before: u64,
+    /// Deepest time step reached by any search of this run.
+    best_deepest: usize,
+    /// Seconds spent inside searches that already finished.
+    busy_before: f64,
     solutions: u64,
     deepest: usize,
     jobs_total: u64,
@@ -55,6 +62,8 @@ impl Progress {
 
     pub fn begin(&self, label: &str, target: &[usize]) {
         let mut s = self.inner.lock().unwrap();
+        s.nodes_before += s.nodes_by_depth.iter().sum::<u64>();
+        s.solutions_before += s.solutions;
         s.label = label.to_string();
         s.target = target.to_vec();
         s.nodes_by_depth = vec![0; target.len()];
@@ -72,8 +81,11 @@ impl Progress {
 
     pub fn finish(&self, summary: &str) {
         let mut s = self.inner.lock().unwrap();
-        if let Some(t) = s.search_started {
-            s.search_elapsed = t.elapsed().as_secs_f64();
+        if s.running {
+            if let Some(t) = s.search_started {
+                s.search_elapsed = t.elapsed().as_secs_f64();
+            }
+            s.busy_before += s.search_elapsed;
         }
         s.running = false;
         s.summary = summary.to_string();
@@ -113,6 +125,7 @@ impl Progress {
         let mut s = self.inner.lock().unwrap();
         if s.deepest_preview.is_none() || depth > s.deepest {
             s.deepest = depth;
+            s.best_deepest = s.best_deepest.max(depth);
             s.deepest_preview = Some(make());
         }
     }
@@ -141,8 +154,17 @@ impl Progress {
         let _ = write!(out, "\"target\":{},", json_numbers(&s.target));
         let _ = write!(out, "\"nodes_by_depth\":{},", json_numbers(&s.nodes_by_depth));
         let _ = write!(out, "\"nodes\":{},", s.nodes_by_depth.iter().sum::<u64>());
+        let _ = write!(
+            out,
+            "\"nodes_total\":{},",
+            s.nodes_before + s.nodes_by_depth.iter().sum::<u64>()
+        );
         let _ = write!(out, "\"solutions\":{},", s.solutions);
+        let _ = write!(out, "\"solutions_total\":{},", s.solutions_before + s.solutions);
         let _ = write!(out, "\"deepest\":{},", s.deepest);
+        let _ = write!(out, "\"best_deepest\":{},", s.best_deepest.max(s.deepest));
+        let busy = s.busy_before + if s.running { elapsed } else { 0.0 };
+        let _ = write!(out, "\"busy\":{:.3},", busy);
         let _ = write!(out, "\"jobs_done\":{},\"jobs_total\":{},", s.jobs_done, s.jobs_total);
         let _ = write!(out, "\"overall_done\":{},\"overall_total\":{},", s.overall_done, s.overall_total);
         let history: Vec<String> = s.history.iter().map(|h| json_string(h)).collect();
@@ -228,6 +250,27 @@ mod test {
         assert!(json.contains("\"jobs_total\":4"));
         assert!(json.contains("\"frames\":[[[0,0]],[[0,0],[1,0]]]"));
         assert!(json.contains("line\\nbreak"));
+    }
+
+    #[test]
+    fn totals_accumulate_across_searches() {
+        let progress = Progress::new();
+        progress.begin("first", &[1, 2]);
+        progress.flush(&[1, 10], 3);
+        progress.offer_deepest(1, || Preview { depth: 1, ..Default::default() });
+        progress.finish("one");
+        progress.finish("one again");
+        progress.begin("second", &[1, 2, 3]);
+        progress.flush(&[1, 2, 3], 4);
+        let json = progress.to_json();
+        assert!(json.contains("\"nodes\":6,"), "{}", json);
+        assert!(json.contains("\"nodes_total\":17,"), "{}", json);
+        assert!(json.contains("\"solutions\":4,"), "{}", json);
+        assert!(json.contains("\"solutions_total\":7,"), "{}", json);
+        // The best prefix survives into the next search, whose own deepest starts again at 0.
+        assert!(json.contains("\"deepest\":0,"), "{}", json);
+        assert!(json.contains("\"best_deepest\":1,"), "{}", json);
+        assert!(json.contains("\"busy\":"), "{}", json);
     }
 
     #[test]

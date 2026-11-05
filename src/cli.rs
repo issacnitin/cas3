@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::analysis::{arity_scan, complexity_profile, legacy_expression_variants};
+use crate::dashboard;
 use crate::lattice::Neighbourhood;
+use crate::progress::Progress;
 use crate::reference::{
     pattern_to_string, reference_states, render_evolution, verify_solution, SolutionRule,
 };
@@ -18,10 +22,15 @@ USAGE:
 COMMANDS:
     search    Exact lazy rule-table search: does ANY rule (birth/survival tables over a
               neighbourhood) produce the target set-cell counts from a single seed cell?
+    profile   Smallest number of table entries a rule must consult to reproduce the first
+              L terms, for every L. Flat curve = a real generator; steady growth = memorising.
+    scan      Run `search` on every r-subset of the Moore neighbourhood (up to symmetry),
+              r = 1..max-arity: all rules that depend on at most r neighbours.
+    space     Compare the legacy search-space size with the new one, per dimension
     legacy    The original expression-tree enumeration (only practical in dimension 1)
     help      Show this message
 
-OPTIONS (search):
+OPTIONS (search, profile, scan):
     --dim N                 lattice dimension                          [default: 2]
     --neighbourhood KIND    moore | vonneumann                         [default: moore]
     --radius R              Moore radius                               [default: 1]
@@ -34,10 +43,22 @@ OPTIONS (search):
     --no-symmetry           disable symmetry reduction (for measurements)
     --first                 stop at the first solution
     --show K                print up to K solutions                    [default: 3]
-    --time-limit SECS       stop after this many seconds
+    --time-limit SECS       stop after this many seconds (per attempt for profile)
     --node-limit N          stop after about N search nodes
     --threads N             worker threads                             [default: all cores]
     --sequential            run on a single thread
+    --dashboard PORT        live monitor at http://127.0.0.1:PORT (0 = any free port)
+    --hold                  keep the dashboard up after the run until Ctrl+C
+
+OPTIONS (profile):
+    --entry-cap E           give up beyond E consulted entries         [default: 80]
+
+OPTIONS (scan):
+    --min-arity R  --max-arity R   neighbour counts to scan            [default: 1..4]
+    --verbose               print every neighbour class
+
+OPTIONS (space):
+    --max-dim N             largest dimension in the table             [default: 3]
 
 OPTIONS (legacy):
     --min-dim N  --max-dim N  --target SPEC  --terms N
@@ -48,7 +69,7 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 3] = ["no-symmetry", "first", "sequential"];
+const FLAG_NAMES: [&str; 5] = ["no-symmetry", "first", "sequential", "hold", "verbose"];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut values = HashMap::new();
@@ -174,8 +195,38 @@ fn describe_solution(nb: &Neighbourhood, solution: &Solution, mode: SurvivalMode
     text
 }
 
+/// Starts the live dashboard when `--dashboard PORT` is given and returns the shared telemetry.
+fn start_dashboard(opts: &Options) -> Result<Option<Arc<Progress>>, String> {
+    let port = match opts.number::<u16>("dashboard")? {
+        Some(port) => port,
+        None => return Ok(None),
+    };
+    let progress = Progress::new();
+    let bound = dashboard::serve(progress.clone(), port)
+        .map_err(|e| format!("cannot start the dashboard on port {}: {}", port, e))?;
+    println!("dashboard     : http://127.0.0.1:{}", bound);
+    Ok(Some(progress))
+}
+
+fn hold_dashboard(opts: &Options, progress: &Option<Arc<Progress>>) {
+    if progress.is_some() && opts.flag("hold") {
+        println!("dashboard stays up; press Ctrl+C to exit");
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    }
+}
+
 fn run_search(opts: &Options) -> Result<(), String> {
-    let params = build_params(opts)?;
+    let progress = start_dashboard(opts)?;
+    let mut params = build_params(opts)?;
+    params.progress = progress.clone();
+    params.label = format!(
+        "dim {} · {} neighbours · {:?} survival",
+        params.neighbourhood.dim,
+        params.neighbourhood.len(),
+        params.survival
+    );
     let nb = &params.neighbourhood;
     println!("neighbourhood : dim {} with {} neighbours", nb.dim, nb.len());
     println!("target        : {:?}", params.target);
@@ -186,6 +237,15 @@ fn run_search(opts: &Options) -> Result<(), String> {
     );
 
     let report = search(&params)?;
+    if let Some(p) = &progress {
+        p.push_history(format!(
+            "search finished: {} nodes, {} solution classes, longest prefix {} terms, {:.2?}",
+            report.nodes,
+            report.solutions,
+            report.matched_terms(),
+            report.elapsed
+        ));
+    }
 
     println!();
     println!("nodes per depth : {:?}", report.nodes_by_depth);
@@ -221,6 +281,246 @@ fn run_search(opts: &Options) -> Result<(), String> {
         let states = reference_states(nb, &rule, params.target.len() - 1);
         print!("{}", render_evolution(&states));
     }
+    hold_dashboard(opts, &progress);
+    Ok(())
+}
+
+fn print_solution(nb: &Neighbourhood, params: &SearchParams, solution: &Solution) {
+    print!("{}", describe_solution(nb, solution, params.survival));
+    let rule = SolutionRule::new(solution, params.survival, None);
+    let states = reference_states(nb, &rule, params.target.len() - 1);
+    print!("{}", render_evolution(&states));
+}
+
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn run_profile(opts: &Options) -> Result<(), String> {
+    let progress = start_dashboard(opts)?;
+    let mut params = build_params(opts)?;
+    params.progress = progress.clone();
+    params.label = format!(
+        "profile · dim {} · {} neighbours · {:?} survival",
+        params.neighbourhood.dim,
+        params.neighbourhood.len(),
+        params.survival
+    );
+    let last = params.target.len();
+    if last < 2 {
+        return Err("profile needs a target with at least 2 terms".to_string());
+    }
+    let entry_cap = opts.number::<usize>("entry-cap")?.unwrap_or(80);
+    let attempt_limit = params.time_limit.take();
+    params.max_entries = None;
+    let nb = params.neighbourhood.clone();
+    println!(
+        "profile: dim {} with {} neighbours, survival {:?}, target {:?}",
+        nb.dim,
+        nb.len(),
+        params.survival,
+        params.target
+    );
+    println!("minimal number of table entries a rule must consult to reproduce the first L terms");
+    println!("{:>4} {:>6} {:>12} {:>5} {:>14} {:>10}", "L", "term", "min entries", "+", "nodes", "time");
+
+    let mut previous: Option<usize> = None;
+    let rows = complexity_profile(&params, 2, last, entry_cap, attempt_limit, |row| {
+        let term = params.target[row.terms - 1];
+        let line = match row.min_entries {
+            Some(entries) => {
+                let delta = previous.map(|p| format!("{:+}", entries as i64 - p as i64)).unwrap_or_default();
+                previous = Some(entries);
+                format!(
+                    "{:>4} {:>6} {:>12} {:>5} {:>14} {:>10.2?}",
+                    row.terms, term, entries, delta, row.nodes, row.elapsed
+                )
+            }
+            None => format!(
+                "{:>4} {:>6} {:>12} {:>5} {:>14} {:>10.2?}   (all rules with < {} entries excluded; stopped by the cap or time limit)",
+                row.terms,
+                term,
+                format!("> {}", row.ruled_out_below.saturating_sub(1)),
+                "",
+                row.nodes,
+                row.elapsed,
+                row.ruled_out_below
+            ),
+        };
+        println!("{}", line);
+        if let Some(p) = &progress {
+            p.push_history(match row.min_entries {
+                Some(entries) => format!(
+                    "{} terms (…{}): minimal rule consults {} table entries · {} nodes · {:.1?}",
+                    row.terms, term, entries, grouped(row.nodes), row.elapsed
+                ),
+                None => format!(
+                    "{} terms (…{}): more than {} entries needed (cap or time limit) · {} nodes · {:.1?}",
+                    row.terms, term, row.ruled_out_below.saturating_sub(1), grouped(row.nodes), row.elapsed
+                ),
+            });
+            p.set_phase("profile", (row.terms - 1) as u64, (last - 1) as u64);
+        }
+    })?;
+
+    if let Some(p) = &progress {
+        let settled = rows.iter().filter(|r| r.min_entries.is_some()).count();
+        let last_min = rows.iter().rev().find_map(|r| r.min_entries);
+        p.finish(&format!(
+            "profile finished: {} of {} prefix lengths settled exactly; the longest needs {} table entries",
+            settled,
+            last - 1,
+            last_min.map(|m| m.to_string()).unwrap_or_else(|| "?".to_string())
+        ));
+    }
+
+    if let Some(row) = rows.iter().rev().find(|r| r.solution.is_some()) {
+        println!();
+        println!(
+            "simplest rule reproducing the first {} terms ({} table entries):",
+            row.terms,
+            row.min_entries.unwrap_or(0)
+        );
+        let solution = row.solution.as_ref().unwrap();
+        let target = &params.target[..row.terms];
+        let verified = verify_solution(&nb, target, solution, params.survival, 16);
+        println!("  re-verified with the reference simulator: {}", if verified { "ok" } else { "FAILED" });
+        let mut shown = params.clone();
+        shown.target = target.to_vec();
+        print_solution(&nb, &shown, solution);
+    }
+    hold_dashboard(opts, &progress);
+    Ok(())
+}
+
+fn run_scan(opts: &Options) -> Result<(), String> {
+    let progress = start_dashboard(opts)?;
+    let mut params = build_params(opts)?;
+    params.store_limit = 0;
+    params.label = format!("scan · dim {} · {:?} survival", params.neighbourhood.dim, params.survival);
+    let min_arity = opts.number::<usize>("min-arity")?.unwrap_or(1);
+    let max_arity = opts.number::<usize>("max-arity")?.unwrap_or(4);
+    let dim = params.neighbourhood.dim;
+    let verbose = opts.flag("verbose");
+    println!(
+        "scan: every rule depending on at most r neighbours of the {}-dimensional Moore neighbourhood, r = {}..={}",
+        dim, min_arity, max_arity
+    );
+    println!("target {:?}, survival {:?}", params.target, params.survival);
+
+    let summaries = arity_scan(&params, min_arity..=max_arity, progress.clone(), |class| {
+        if verbose {
+            let offsets: Vec<String> = class
+                .offsets
+                .iter()
+                .map(|o| format!("({})", o.iter().map(|x| format!("{:+}", x)).collect::<Vec<_>>().join(",")))
+                .collect();
+            println!(
+                "  r={} class {:>3}/{:<3} prefix {:>2} terms, {:>10} solution classes, {:>10} nodes {:>9.2?}{}  {}",
+                class.arity,
+                class.index + 1,
+                class.classes_in_arity,
+                class.matched_terms,
+                class.solutions,
+                class.nodes,
+                class.elapsed,
+                if class.complete { "" } else { " (limit)" },
+                offsets.join(" ")
+            );
+        }
+        if let Some(p) = &progress {
+            if class.solutions > 0 || class.index + 1 == class.classes_in_arity {
+                p.push_history(format!(
+                    "r={} class {}/{}: prefix {} terms, {} solution classes",
+                    class.arity,
+                    class.index + 1,
+                    class.classes_in_arity,
+                    class.matched_terms,
+                    class.solutions
+                ));
+            }
+        }
+    })?;
+
+    println!();
+    println!(
+        "{:>5} {:>8} {:>16} {:>12} {:>14} {:>10}",
+        "r", "classes", "with solutions", "best prefix", "nodes", "time"
+    );
+    for s in &summaries {
+        println!(
+            "{:>5} {:>8} {:>16} {:>9}/{:<2} {:>14} {:>10.2?}{}",
+            s.arity,
+            s.classes,
+            s.with_solutions,
+            s.best_matched,
+            params.target.len(),
+            s.nodes,
+            s.elapsed,
+            if s.incomplete > 0 { format!("  ({} classes hit a limit)", s.incomplete) } else { String::new() }
+        );
+    }
+    println!("best prefix = the most terms of the target that any rule with at most r neighbours can reproduce");
+    if let Some(p) = &progress {
+        let best = summaries.iter().map(|s| s.best_matched).max().unwrap_or(0);
+        let cut_short: usize = summaries.iter().map(|s| s.incomplete).sum();
+        let total = params.target.len();
+        p.finish(&if cut_short > 0 {
+            format!(
+                "scan finished with {} classes cut short by a limit: best prefix found is {} of {} terms (a lower bound)",
+                cut_short, best, total
+            )
+        } else if best < total {
+            format!(
+                "scan finished (exhaustive): no rule with at most {} neighbours reproduces more than {} of {} terms",
+                max_arity, best, total
+            )
+        } else {
+            format!(
+                "scan finished (exhaustive): some rule with at most {} neighbours reproduces all {} terms",
+                max_arity, total
+            )
+        });
+    }
+    hold_dashboard(opts, &progress);
+    Ok(())
+}
+
+fn run_space(opts: &Options) -> Result<(), String> {
+    let max_dim = opts.number::<usize>("max-dim")?.unwrap_or(3);
+    println!(
+        "{:>3} {:>7} {:>28} {:>26} {:>26}",
+        "dim", "inputs", "legacy structures / function", "legacy (birth, survival)", "unrestricted tables"
+    );
+    for dim in 1..=max_dim {
+        let inputs = (3usize).pow(dim as u32);
+        let neighbours = inputs - 1;
+        let structures = legacy_expression_variants(inputs);
+        let pairs = structures.checked_mul(structures);
+        let tables = if neighbours <= 62 {
+            format!("2^{}", SearchReport::space_bits(neighbours, SurvivalMode::Free))
+        } else {
+            "not supported".to_string()
+        };
+        println!(
+            "{:>3} {:>7} {:>28} {:>26} {:>26}",
+            dim,
+            inputs,
+            structures,
+            pairs.map(|p| format!("{}", p)).unwrap_or_else(|| "> 3.4e38".to_string()),
+            tables
+        );
+    }
+    println!("legacy structures exclude the input permutations tried for every structure;");
+    println!("the new engine never enumerates tables: it branches only on entries a simulation consults.");
     Ok(())
 }
 
@@ -241,6 +541,9 @@ pub fn run() {
     let command = args.first().map(String::as_str).unwrap_or("help");
     let result = match command {
         "search" => parse_options(&args[1..]).and_then(|o| run_search(&o)),
+        "profile" => parse_options(&args[1..]).and_then(|o| run_profile(&o)),
+        "scan" => parse_options(&args[1..]).and_then(|o| run_scan(&o)),
+        "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {
             print!("{}", USAGE);

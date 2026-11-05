@@ -68,6 +68,7 @@ pub fn reference_states<R: RuleFn + ?Sized>(nb: &Neighbourhood, rule: &R, steps:
     states
 }
 
+#[cfg(test)]
 pub fn reference_counts<R: RuleFn + ?Sized>(nb: &Neighbourhood, rule: &R, steps: usize) -> Vec<usize> {
     reference_states(nb, rule, steps).iter().map(|c| c.len()).collect()
 }
