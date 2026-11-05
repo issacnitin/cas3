@@ -53,7 +53,7 @@ handled by the permutation we apply to input variables. So for three variables, 
 
 ## Reducing the search space: exact rule-table search
 
-The expression enumeration walks a *syntactic* space: formulas and input permutations. `cas3 space` shows how fast it grows (before the input permutations tried for each structure):
+The expression enumeration walks a *syntactic* space: formulas and input permutations. The `space` command shows how fast it grows (before the input permutations tried for each structure):
 
 | dimension | inputs (3^N) | expression structures per boolean function | (birth, survival) pairs | unrestricted tables |
 |---|---|---|---|---|
@@ -114,7 +114,7 @@ All results are for the first terms of 1, 2, 3, 5, 7, 11, 13, … (the seed coun
   2D Moore: 9, 10, 14, 19, 23, 29, 31, 33, 33, 41, 45, 48; 3D Moore: 27, 28, 32, 41, 53, 65, 67.
   No flat tail was found in any class: prefixes of the primes can be fitted, but no compact generator.
 
-The README's original question (is there a dimension in which a *compact* rule generates the primes?) is not settled by this: it is a prefix test within the classes above, the classes beyond them are astronomically larger, and a flat profile in some unexplored class would be the sign to look for.
+The project's original question (is there a dimension in which a rule generates the whole prime sequence?) is not settled by this: it is a prefix test within the classes above, the classes beyond them are astronomically larger, and a flat profile in some unexplored class would be the sign to look for.
 
 ### Usage
 
@@ -126,7 +126,7 @@ cargo run --release -- profile --dim 2 --terms 13                  # minimal rul
 cargo run --release -- profile --dim 2 --target squares --terms 12 # a control sequence
 cargo run --release -- scan    --dim 2 --max-arity 4 --terms 10    # every rule using at most 4 neighbours
 cargo run --release -- space   --max-dim 3                         # legacy search-space sizes
-cargo run --release -- legacy  --min-dim 1 --max-dim 1             # the original expression search
+cargo run --release -- legacy  --min-dim 1 --max-dim 1             # the original expression search (dimension 2 needs ~3.8e13 expression pairs and is refused unless --force)
 ```
 
 Add `--dashboard 8787 --hold` to `search`, `profile` or `scan` and open `http://127.0.0.1:8787` for a live monitor (loopback only): nodes per second, nodes per time step, how much of the target the best rule so far reproduces, the evolution of that rule, and the history of finished steps. `--time-limit`, `--node-limit` and `--max-entries` bound a run; an unbounded `search` on a large neighbourhood can run for a very long time.
@@ -140,4 +140,4 @@ Add `--dashboard 8787 --hold` to `search`, `profile` or `scan` and open `http://
 
 ## Current status
 
-The original expression search still only gets as far as the 2nd dimension if you run it long enough. The rule-table search settles the question exactly for much larger classes: in every class tried, short prefixes of the primes can be matched but no compact rule was found, and the minimum description length of the prime prefixes keeps growing. I still have a feeling it requires 137 dimensions :)
+The original expression search still only gets as far as the 2nd dimension if you run it long enough. The rule-table search answers the prefix question exactly for much larger classes than that: in every class tried, short prefixes of the primes can be matched but no compact rule was found, and the minimum description length of the prime prefixes keeps growing. I still have a feeling it requires 137 dimensions :)

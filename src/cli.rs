@@ -17,7 +17,7 @@ const USAGE: &str = "\
 CAS3 - cellular automata state space search for prime generation
 
 USAGE:
-    cas3 <COMMAND> [OPTIONS]
+    cargo run --release -- <COMMAND> [OPTIONS]
 
 COMMANDS:
     search    Exact lazy rule-table search: does ANY rule (birth/survival tables over a
@@ -62,6 +62,7 @@ OPTIONS (space):
 
 OPTIONS (legacy):
     --min-dim N  --max-dim N  --target SPEC  --terms N
+    --force                 attempt dimensions whose expression pairs do not fit in memory
 ";
 
 struct Options {
@@ -69,7 +70,7 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 5] = ["no-symmetry", "first", "sequential", "hold", "verbose"];
+const FLAG_NAMES: [&str; 6] = ["no-symmetry", "first", "sequential", "hold", "verbose", "force"];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut values = HashMap::new();
@@ -524,9 +525,44 @@ fn run_space(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// The legacy search keeps every (birth, survival) expression pair in memory.
+const LEGACY_PAIR_LIMIT: u128 = 100_000_000;
+
+fn legacy_guard(max_dim: usize, force: bool) -> Result<(), String> {
+    if force {
+        return Ok(());
+    }
+    for dim in 1..=max_dim {
+        let structures = legacy_expression_variants((3usize).pow(dim as u32));
+        let pairs = structures.checked_mul(structures).unwrap_or(u128::MAX);
+        if pairs > LEGACY_PAIR_LIMIT {
+            return Err(format!(
+                "the legacy search at dimension {} has to hold {} expression pairs in memory (see the `space` command). \
+Use the `search` command instead, or pass --force to try anyway",
+                dim,
+                if pairs == u128::MAX { "more than 3.4e38".to_string() } else { grouped_u128(pairs) }
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn grouped_u128(n: u128) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn run_legacy(opts: &Options) -> Result<(), String> {
     let min_dim = opts.number::<usize>("min-dim")?.unwrap_or(1);
     let max_dim = opts.number::<usize>("max-dim")?.unwrap_or(1);
+    legacy_guard(max_dim, opts.flag("force"))?;
     let terms = opts.number::<usize>("terms")?.unwrap_or(10);
     let target = parse_target(&opts.text("target", "primes"), terms)?;
     let explorer = StateExplorer::new(min_dim, max_dim, target);
@@ -554,5 +590,73 @@ pub fn run() {
     if let Err(message) = result {
         eprintln!("error: {}", message);
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn options_split_into_values_and_flags() {
+        let opts = parse_options(&args(&["--dim", "3", "--first", "--target", "1,2,3", "--hold"])).unwrap();
+        assert_eq!(opts.number::<usize>("dim").unwrap(), Some(3));
+        assert_eq!(opts.text("target", "primes"), "1,2,3");
+        assert!(opts.flag("first") && opts.flag("hold") && !opts.flag("sequential"));
+        assert!(parse_options(&args(&["--dim"])).is_err());
+        assert!(parse_options(&args(&["dim", "3"])).is_err());
+        assert!(parse_options(&args(&["--dim", "x"])).unwrap().number::<usize>("dim").is_err());
+    }
+
+    #[test]
+    fn search_parameters_have_sensible_defaults() {
+        let params = build_params(&parse_options(&[]).unwrap()).unwrap();
+        assert_eq!(params.neighbourhood.dim, 2);
+        assert_eq!(params.neighbourhood.len(), 8);
+        assert_eq!(params.target, vec![1, 2, 3, 5, 7, 11, 13, 17, 19, 23]);
+        assert_eq!(params.survival, SurvivalMode::Free);
+        assert!(params.symmetry && params.parallel && !params.find_first);
+
+        let custom = build_params(
+            &parse_options(&args(&[
+                "--dim", "2", "--offsets", "1,0;0,1;1,1", "--survival", "always", "--no-symmetry",
+                "--max-entries", "30", "--time-limit", "1.5", "--target", "naturals", "--terms", "5",
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(custom.neighbourhood.len(), 3);
+        assert_eq!(custom.survival, SurvivalMode::Always);
+        assert!(!custom.symmetry);
+        assert_eq!(custom.max_entries, Some(30));
+        assert_eq!(custom.time_limit, Some(Duration::from_millis(1500)));
+        assert_eq!(custom.target, vec![1, 2, 3, 4, 5]);
+
+        let vn = build_params(&parse_options(&args(&["--dim", "3", "--neighbourhood", "vonneumann"])).unwrap()).unwrap();
+        assert_eq!(vn.neighbourhood.len(), 6);
+        assert!(build_params(&parse_options(&args(&["--survival", "sometimes"])).unwrap()).is_err());
+        assert!(build_params(&parse_options(&args(&["--neighbourhood", "hex"])).unwrap()).is_err());
+    }
+
+    #[test]
+    fn legacy_search_is_refused_where_it_cannot_fit_in_memory() {
+        assert!(legacy_guard(1, false).is_ok());
+        let refused = legacy_guard(2, false).unwrap_err();
+        assert!(refused.contains("37,950,331,027,456"), "{}", refused);
+        assert!(legacy_guard(3, false).is_err());
+        assert!(legacy_guard(2, true).is_ok());
+    }
+
+    #[test]
+    fn numbers_are_grouped_in_thousands() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1_000), "1,000");
+        assert_eq!(grouped(171_397_094), "171,397,094");
+        assert_eq!(grouped_u128(37_950_331_027_456), "37,950,331,027,456");
     }
 }
