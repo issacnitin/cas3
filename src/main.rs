@@ -7,6 +7,7 @@ mod graph;
 mod permutation;
 mod lattice;
 mod analysis;
+mod bounds;
 mod dashboard;
 mod progress;
 mod reference;

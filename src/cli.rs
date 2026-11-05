@@ -55,6 +55,8 @@ OPTIONS (profile):
 
 OPTIONS (scan):
     --min-arity R  --max-arity R   neighbour counts to scan            [default: 1..4]
+    --universe-radius R     draw the neighbours from the Moore block of this radius
+                                                                       [default: 1]
     --verbose               print every neighbour class
 
 OPTIONS (space):
@@ -236,6 +238,14 @@ fn run_search(opts: &Options) -> Result<(), String> {
         "unrestricted rule space: 2^{} tables",
         SearchReport::space_bits(nb.len(), params.survival)
     );
+    if let Some(term) = crate::bounds::first_light_cone_violation(nb.dim, nb.radius() as usize, &params.target) {
+        println!(
+            "note         : term {} of the target ({}) exceeds the light-cone limit of {}: no rule of this neighbourhood can reach it",
+            term,
+            params.target[term],
+            crate::bounds::light_cone_limit(nb.dim, nb.radius() as usize, term)
+        );
+    }
 
     let report = search(&params)?;
     if let Some(p) = &progress {
@@ -409,15 +419,22 @@ fn run_scan(opts: &Options) -> Result<(), String> {
     params.label = format!("scan · dim {} · {:?} survival", params.neighbourhood.dim, params.survival);
     let min_arity = opts.number::<usize>("min-arity")?.unwrap_or(1);
     let max_arity = opts.number::<usize>("max-arity")?.unwrap_or(4);
+    let universe_radius = opts.number::<i32>("universe-radius")?.unwrap_or(1);
     let dim = params.neighbourhood.dim;
     let verbose = opts.flag("verbose");
     println!(
-        "scan: every rule depending on at most r neighbours of the {}-dimensional Moore neighbourhood, r = {}..={}",
-        dim, min_arity, max_arity
+        "scan: every rule depending on at most r neighbours drawn from the {}-dimensional Moore neighbourhood of radius {}, r = {}..={}",
+        dim, universe_radius, min_arity, max_arity
     );
     println!("target {:?}, survival {:?}", params.target, params.survival);
+    if let Some(term) = crate::bounds::first_light_cone_violation(dim, universe_radius as usize, &params.target) {
+        println!(
+            "note: term {} of the target ({}) exceeds what any rule of radius {} can reach in {} dimension(s) (light cone)",
+            term, params.target[term], universe_radius, dim
+        );
+    }
 
-    let summaries = arity_scan(&params, min_arity..=max_arity, progress.clone(), |class| {
+    let summaries = arity_scan(&params, min_arity..=max_arity, universe_radius, progress.clone(), |class| {
         if verbose {
             let offsets: Vec<String> = class
                 .offsets
@@ -453,23 +470,25 @@ fn run_scan(opts: &Options) -> Result<(), String> {
 
     println!();
     println!(
-        "{:>5} {:>8} {:>16} {:>12} {:>14} {:>10}",
+        "{:>5} {:>8} {:>16} {:>12} {:>14} {:>10}  verdict",
         "r", "classes", "with solutions", "best prefix", "nodes", "time"
     );
+    let total = params.target.len();
     for s in &summaries {
+        let verdict = if s.incomplete > 0 {
+            format!("partial: {} classes hit a limit, prefix {} is a lower bound", s.incomplete, s.best_matched)
+        } else if s.best_matched < total {
+            format!("DEAD: no rule with at most {} neighbours generates more than {} terms", s.arity, s.best_matched)
+        } else {
+            format!("alive: some rule reproduces all {} target terms", total)
+        };
         println!(
-            "{:>5} {:>8} {:>16} {:>9}/{:<2} {:>14} {:>10.2?}{}",
-            s.arity,
-            s.classes,
-            s.with_solutions,
-            s.best_matched,
-            params.target.len(),
-            s.nodes,
-            s.elapsed,
-            if s.incomplete > 0 { format!("  ({} classes hit a limit)", s.incomplete) } else { String::new() }
+            "{:>5} {:>8} {:>16} {:>9}/{:<2} {:>14} {:>10.2?}  {}",
+            s.arity, s.classes, s.with_solutions, s.best_matched, total, s.nodes, s.elapsed, verdict
         );
     }
-    println!("best prefix = the most terms of the target that any rule with at most r neighbours can reproduce");
+    println!("best prefix = the most terms of the target that any rule with at most r neighbours can reproduce;");
+    println!("DEAD classes are proven: a rule generating the whole sequence would match every prefix.");
     if let Some(p) = &progress {
         let best = summaries.iter().map(|s| s.best_matched).max().unwrap_or(0);
         let cut_short: usize = summaries.iter().map(|s| s.incomplete).sum();

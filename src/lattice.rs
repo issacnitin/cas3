@@ -57,37 +57,7 @@ impl Neighbourhood {
     /// For radius 1 the order is the odometer order used by the legacy `Cell`
     /// (dimension 0 varies fastest, each digit goes 0, +1, -1).
     pub fn moore(dim: usize, radius: i32) -> Result<Self, String> {
-        if radius < 1 {
-            return Err("radius must be at least 1".to_string());
-        }
-        let side = (2 * radius + 1) as usize;
-        let total = (side as u128).checked_pow(dim as u32).unwrap_or(u128::MAX);
-        if total - 1 > MAX_NEIGHBOURS as u128 {
-            return Err(format!(
-                "Moore neighbourhood of radius {} in {} dimensions has {} neighbours; at most {} are supported",
-                radius,
-                dim,
-                total - 1,
-                MAX_NEIGHBOURS
-            ));
-        }
-        let total = total as usize;
-        let mut offsets = Vec::with_capacity(total - 1);
-        for index in 1..total {
-            let mut rest = index;
-            let mut offset = Vec::with_capacity(dim);
-            for _ in 0..dim {
-                let digit = (rest % side) as i32;
-                rest /= side;
-                offset.push(match digit {
-                    0 => 0,
-                    d if d % 2 == 1 => (d + 1) / 2,
-                    d => -(d / 2),
-                });
-            }
-            offsets.push(offset);
-        }
-        Neighbourhood::new(dim, offsets)
+        Neighbourhood::new(dim, moore_offsets(dim, radius, MAX_NEIGHBOURS)?)
     }
 
     /// The 2*dim axis neighbours: +e0, -e0, +e1, -e1, ...
@@ -292,23 +262,74 @@ impl SymmetryGroup {
     }
 }
 
+/// All offsets within Chebyshev distance `radius` (the cell itself excluded), in odometer order.
+/// Fails when there would be more than `cap` of them.
+pub fn moore_offsets(dim: usize, radius: i32, cap: usize) -> Result<Vec<Vec<i32>>, String> {
+    if radius < 1 {
+        return Err("radius must be at least 1".to_string());
+    }
+    let side = (2 * radius + 1) as usize;
+    let total = (side as u128).checked_pow(dim as u32).unwrap_or(u128::MAX);
+    if total - 1 > cap as u128 {
+        return Err(format!(
+            "Moore neighbourhood of radius {} in {} dimensions has {} neighbours; at most {} are supported here",
+            radius,
+            dim,
+            total - 1,
+            cap
+        ));
+    }
+    let total = total as usize;
+    let mut offsets = Vec::with_capacity(total - 1);
+    for index in 1..total {
+        let mut rest = index;
+        let mut offset = Vec::with_capacity(dim);
+        for _ in 0..dim {
+            let digit = (rest % side) as i32;
+            rest /= side;
+            offset.push(match digit {
+                0 => 0,
+                d if d % 2 == 1 => (d + 1) / 2,
+                d => -(d / 2),
+            });
+        }
+        offsets.push(offset);
+    }
+    Ok(offsets)
+}
+
 /// One representative per hyperoctahedral orbit of the `arity`-element subsets of the unit
 /// Moore neighbourhood, as sorted index lists into `Neighbourhood::moore(dim, 1).offsets`.
-/// Choosing the lexicographically smallest image makes the representative canonical.
 pub fn subset_orbit_representatives(dim: usize, arity: usize) -> Result<Vec<Vec<usize>>, String> {
+    subset_orbit_representatives_in(dim, &moore_offsets(dim, 1, MAX_NEIGHBOURS)?, arity)
+}
+
+/// One representative per orbit of the `arity`-element subsets of `universe` (offsets that the
+/// symmetries of the lattice map onto each other, such as a Moore neighbourhood of any radius),
+/// as sorted index lists into `universe`. Choosing the lexicographically smallest image makes the
+/// representative canonical. Symmetries that do not preserve `universe` are ignored.
+pub fn subset_orbit_representatives_in(
+    dim: usize,
+    universe: &[Vec<i32>],
+    arity: usize,
+) -> Result<Vec<Vec<usize>>, String> {
     if dim > MAX_SYMMETRY_DIM {
         return Err(format!("orbit enumeration supports dimension <= {}", MAX_SYMMETRY_DIM));
     }
-    let moore = Neighbourhood::moore(dim, 1)?;
-    let k = moore.len();
+    let k = universe.len();
     if arity == 0 || arity > k {
         return Err(format!("arity must be between 1 and {}", k));
     }
-    let index: HashMap<&Vec<i32>, usize> = moore.offsets.iter().enumerate().map(|(i, o)| (o, i)).collect();
+    let index: HashMap<&Vec<i32>, usize> = universe.iter().enumerate().map(|(i, o)| (o, i)).collect();
     let images: Vec<Vec<usize>> = hyperoctahedral_group(dim)
         .iter()
         .filter(|g| !g.is_identity())
-        .map(|g| moore.offsets.iter().map(|o| index[&g.apply_offset(o)]).collect())
+        .filter_map(|g| {
+            universe
+                .iter()
+                .map(|o| index.get(&g.apply_offset(o)).copied())
+                .collect::<Option<Vec<usize>>>()
+        })
         .collect();
 
     let mut representatives = vec![];
@@ -446,6 +467,40 @@ mod test {
                 assert_eq!(covered, binomial(k, arity), "dim {} arity {}", dim, arity);
             }
         }
+    }
+
+    #[test]
+    fn orbit_representatives_partition_larger_universes() {
+        for (dim, radius, arities) in [(2usize, 2i32, 1..=3usize), (2, 3, 1..=2), (3, 2, 1..=2)] {
+            let universe = moore_offsets(dim, radius, 1000).unwrap();
+            let k = universe.len();
+            let group = hyperoctahedral_group(dim);
+            let index: HashMap<&Vec<i32>, usize> = universe.iter().enumerate().map(|(i, o)| (o, i)).collect();
+            for arity in arities {
+                let reps = subset_orbit_representatives_in(dim, &universe, arity).unwrap();
+                let mut covered = 0;
+                for rep in &reps {
+                    let mut orbit: HashSet<Vec<usize>> = HashSet::new();
+                    for g in &group {
+                        let mut image: Vec<usize> =
+                            rep.iter().map(|&j| index[&g.apply_offset(&universe[j])]).collect();
+                        image.sort_unstable();
+                        orbit.insert(image);
+                    }
+                    covered += orbit.len();
+                }
+                assert_eq!(covered, binomial(k, arity), "dim {} radius {} arity {}", dim, radius, arity);
+            }
+        }
+    }
+
+    #[test]
+    fn moore_offsets_agree_with_the_neighbourhood_constructor() {
+        assert_eq!(moore_offsets(2, 1, 62).unwrap(), Neighbourhood::moore(2, 1).unwrap().offsets);
+        assert_eq!(moore_offsets(2, 2, 100).unwrap().len(), 24);
+        assert_eq!(moore_offsets(3, 2, 1000).unwrap().len(), 124);
+        assert!(moore_offsets(3, 2, 62).is_err());
+        assert!(moore_offsets(2, 0, 62).is_err());
     }
 
     #[test]

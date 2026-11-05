@@ -100,15 +100,24 @@ All results are for the first terms of 1, 2, 3, 5, 7, 11, 13, … (the seed coun
 
 * **1D, radius 1 (3 cells):** no rule reproduces more than 1, 2, 3 (all 2^7 rules, 5 nodes). Radius 2 reaches exactly 10 terms (1 … 23) and nothing beyond; radius 3 reaches at least 26 within a 60 s cap (partial).
 * **Axis-only neighbourhood (von Neumann), dimensions 2 to 6:** no rule reproduces more than 1, 2, 3, 5. More dimensions do not help.
-* **Rules depending on at most r neighbours of the Moore neighbourhood (`scan`):**
+* **Rules depending on at most r neighbours of the Moore neighbourhood (`scan`),** every class exhausted, so every entry is a proven "dead" verdict (no rule in the class reproduces more terms):
 
   | r | 1 | 2 | 3 | 4 | 5 |
   |---|---|---|---|---|---|
-  | longest prime prefix, **2D** | 3 | 3 | 5 | 10 | ≥ 16 (all 16 target terms) |
-  | longest prime prefix, **3D** | 3 | 3 | 5 | 10 | not run |
+  | longest prime prefix, **2D** (3×3 block) | 3 | 3 | 5 | 10 | 22 |
+  | longest prime prefix, **3D** (3×3×3 block) | 3 | 3 | 5 | 10 | not run |
   | neighbour classes (2D / 3D) | 2 / 3 | 6 / 17 | 10 / 84 | 13 / 399 | 10 / – |
 
-  The 2D result for r = 4 stays at exactly 10 terms (1 … 23) even with a 40-term target; the third dimension does not buy any extra terms at a fixed number of neighbours. The prefix length is limited by the information in the neighbourhood, not by the dimension. At r = 5 the capacity jumps: 9 of the 10 neighbour classes reproduce all 16 terms of a 16-term target (1 … 47, about 3 minutes, two classes stopped by the 40 s per-class limit after finding solutions) and the tenth stops at exactly 10.
+  The r = 5 row took 165 s and 298 million nodes (`scan --dim 2 --min-arity 5 --max-arity 5 --terms 40`): one class reaches 22 terms, three reach 21, five reach 20 and one stops at 10. The third dimension does not buy any extra terms at a fixed number of neighbours, and the capacity roughly doubles with every extra neighbour. Neighbours do not have to be adjacent: drawing them from a larger block (`--universe-radius R`, 2D) barely changes the picture.
+
+  | neighbours drawn from the block of radius R | r = 1 | r = 2 | r = 3 | r = 4 | classes at r = 4 |
+  |---|---|---|---|---|---|
+  | 1 (3×3) | 3 | 3 | 5 | 10 | 13 |
+  | 2 (5×5) | 3 | 3 | 5 | 12 | 1,391 |
+  | 3 (7×7) | 3 | 3 | 6 | 12 | 24,630 |
+  | 4 (9×9) | 3 | 3 | 6 | 14 | 198,654 |
+  | 5 (11×11) | 3 | 3 | 6 | 14 | 1,029,135 |
+* **Cells that never die (survival always on), full 2D Moore neighbourhood:** nothing beyond 1, 2, 3, 5, 7, 11, over all 2^255 birth tables (9 nodes). Cells that die after every step form a far richer class: at least 34 terms (partial), and its minimal rule size still grows (8, 9, 13, 17, 20, 25, 27, 29, 29, 37, 41, 44, 46, 49, 54, 55 entries for 2 … 17 terms).
 * **Description length per geometry (primes, entries needed for L = 2, 3, …):**
   1D radius 2: 5, 6, 9, 14, 19, 22, 22, 22, 22, then no rule; 1D radius 3: 7, 8, 12, 18, 22, 30, 30, 30, 30, 42;
   2D Moore: 9, 10, 14, 19, 23, 29, 31, 33, 33, 41, 45, 48; 3D Moore: 27, 28, 32, 41, 53, 65, 67.
@@ -137,6 +146,32 @@ Add `--dashboard 8787 --hold` to `search`, `profile` or `scan` and open `http://
 * Matching a prefix is not a proof about the infinite sequence. Negative results are exact for the class and the prefix length that were searched.
 * Limits: at most 62 neighbours (so the Moore neighbourhood up to 3 dimensions), symmetry reduction up to dimension 5, and `scan` up to dimension 5.
 * Tests: `cargo test --release` (the legacy 2D test is slow); `cargo test --release -- --ignored` adds the 2^31 brute force.
+
+## Can any class generate the whole prime sequence?
+
+A finite search can never verify an infinite sequence, but it can *exclude* classes. A rule that generates the whole sequence reproduces every prefix, so if an exhaustive search proves that no rule of a class reproduces more than L* terms, the class contains no generator. Call such a class **dead**; `scan` prints this verdict.
+
+### Two meanings of "generates the primes"
+
+* **Population** (what this project asks): the number of set cells after t steps is the t-th prime, 1, 2, 3, 5, 7, ….
+* **Time signal** (the classical meaning): one designated cell is ON at step t exactly when t is prime. Fischer (1965) showed that a one-dimensional cellular automaton can do this in real time, and Korec (1997, *Real-time generation of primes by a one-dimensional cellular automaton with 11 states*) reduced it to 11 states with radius 1 and to **2 states with radius 12**, starting from a single non-quiescent cell. In Conway's Life, a binary 2D rule with 8 neighbours (so a member of this project's own 2D Moore class), Dean Hickerson's Primer (1991, 2,953 cells) lets a lightweight spaceship escape at generation 120N + 100 exactly when N is prime.
+
+So for the signal reading the answer is already "yes". I know of no result for the population reading in either direction. The known generators are large: Korec's 11-state table has 11³ entries, about 4,600 bits, against 511 bits for the whole 2D Moore class; the largest classes this tool has exhausted have 63 entries (5 neighbours, free survival) and 255 entries (2D Moore, cells never die).
+
+### What can be said without any search (`src/bounds.rs`, tested)
+
+* **One dimension, any radius: impossible.** After t steps every set cell is within r·t of the seed, so the population is at most 2rt + 1. The t-th prime exceeds t·ln t (Rosser), which is at least (2r + 1)·t once t ≥ e^(2r+1). From dimension 2 the bound (2rt + 1)^d grows faster than the primes and excludes nothing.
+* **Symmetric rules in two or more dimensions: impossible.** A rule invariant under the symmetries of the neighbourhood (totalistic, Life-like) births whole orbits of neighbours, and every orbit has at least 4 cells, so the population after one step is never 2.
+
+### Atlas of dead classes
+
+Every line is an exhaustive result (see Results above for the commands): 1D with any radius (theorem; radius 1 reaches 3 terms, radius 2 reaches 10); the axis-only neighbourhood in dimensions 2 to 6 (4 terms); rules using at most 5 neighbours of the 3×3 block in 2D (22 terms) and at most 4 in 3D (10 terms); at most 4 neighbours anywhere in a block up to 11×11 (14 terms, 1.07 million classes); the full 2D Moore neighbourhood with cells that never die (6 terms).
+
+The capacity of a class grows with its table size and hardly with the geometry (2D: 3, 3, 5, 10, 22 terms for 1 … 5 neighbours), and the minimal rule size for a prime prefix keeps growing while that of 1, 2, 3, 4, …, the odd numbers or the squares stops growing at once. Nothing found so far behaves like a generator.
+
+### What is still open
+
+Classes that cannot be exhausted with this engine (the cost grew about 200,000 times from 4 to 5 neighbours): 6 or more neighbours, the full 2D Moore class with free survival or with cells that die every step, 3D beyond 4 neighbours, and anything with more than two states. For these the search can only fit prefixes. A positive answer for the population reading would have to be constructed (for instance by turning a time-signal generator into a population counter), not found by enumeration.
 
 ## Current status
 

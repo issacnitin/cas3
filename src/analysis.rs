@@ -11,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::lattice::{subset_orbit_representatives, Neighbourhood};
+use crate::lattice::{moore_offsets, subset_orbit_representatives_in, Neighbourhood};
 use crate::progress::Progress;
 use crate::table_search::{search, SearchParams, Solution};
 use std::sync::Arc;
@@ -116,20 +116,22 @@ pub struct ScanSummary {
     pub elapsed: Duration,
 }
 
-/// Runs the exact search on every `r`-element subset of the unit Moore neighbourhood (one per
-/// symmetry orbit) for each arity in `arities`. A rule that depends on fewer neighbours is covered
-/// by any superset, so the result for arity r holds for "at most r neighbours".
+/// Runs the exact search on every `r`-element subset of the Moore neighbourhood of radius
+/// `universe_radius` (one per symmetry orbit) for each arity in `arities`. A rule that depends on
+/// fewer neighbours is covered by any superset, so the result for arity r holds for "at most r
+/// neighbours chosen from that universe".
 pub fn arity_scan(
     base: &SearchParams,
     arities: std::ops::RangeInclusive<usize>,
+    universe_radius: i32,
     progress: Option<Arc<Progress>>,
     mut on_class: impl FnMut(&ScanClass),
 ) -> Result<Vec<ScanSummary>, String> {
     let dim = base.neighbourhood.dim;
-    let moore = Neighbourhood::moore(dim, 1)?;
+    let universe = moore_offsets(dim, universe_radius, 1000)?;
     let mut summaries = vec![];
     for arity in arities {
-        let representatives = subset_orbit_representatives(dim, arity)?;
+        let representatives = subset_orbit_representatives_in(dim, &universe, arity)?;
         let started = Instant::now();
         let mut summary = ScanSummary {
             arity,
@@ -141,7 +143,7 @@ pub fn arity_scan(
             elapsed: Duration::ZERO,
         };
         for (index, representative) in representatives.iter().enumerate() {
-            let nb = moore.select(representative)?;
+            let nb = Neighbourhood::new(dim, representative.iter().map(|&i| universe[i].clone()).collect())?;
             let mut params = base.clone();
             params.neighbourhood = nb.clone();
             params.label = format!("scan arity {} class {}/{}", arity, index + 1, representatives.len());
@@ -253,13 +255,27 @@ mod test {
     }
 
     #[test]
+    fn arity_scan_over_a_larger_block_finds_more_classes_and_the_same_small_capacities() {
+        let mut base = SearchParams::new(Neighbourhood::moore(2, 1).unwrap(), primes_target(30));
+        base.parallel = false;
+        base.store_limit = 0;
+        let summaries = arity_scan(&base, 1..=2, 2, None, |class| {
+            assert!(class.complete);
+        })
+        .unwrap();
+        // Orbits of single offsets / pairs of offsets in the 5x5 block under the symmetries of the square.
+        assert_eq!(summaries.iter().map(|s| s.classes).collect::<Vec<_>>(), vec![5, 44]);
+        assert!(summaries.iter().all(|s| s.with_solutions == 0 && s.best_matched == 3));
+    }
+
+    #[test]
     fn arity_scan_covers_the_neighbourhood_exactly() {
         let mut base = SearchParams::new(Neighbourhood::moore(2, 1).unwrap(), primes_target(6));
         base.parallel = false;
         base.survival = SurvivalMode::Free;
         base.store_limit = 0;
         let mut seen = 0;
-        let summaries = arity_scan(&base, 1..=3, None, |class| {
+        let summaries = arity_scan(&base, 1..=3, 1, None, |class| {
             seen += 1;
             assert!(class.complete);
             assert_eq!(class.offsets.len(), class.arity);
