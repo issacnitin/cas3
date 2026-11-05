@@ -229,6 +229,38 @@ impl StateExplorer {
         }
     }
 
+    /// One synchronous generation: materialise the neighbours of set cells, then update every cell.
+    fn advance_rule_set(rule_set: &RuleSet, space: &mut Space, truth_buf: &mut Vec<bool>, coord_buf: &mut Vec<i32>) {
+        space.generate_next_iteration();
+        let mut modified_cells: Vec<Cell> = Vec::with_capacity(space.len());
+        for existing_cell in space.cells.iter() {
+            let mut c = existing_cell.clone();
+            Self::apply_rule_set(rule_set, &mut c, space, truth_buf, coord_buf);
+            modified_cells.push(c);
+        }
+        for c in modified_cells.iter() {
+            space.push_cell(c);
+        }
+    }
+
+    /// Set-cell counts at t = 0..=steps for a single seed cell, using the original `Space` engine.
+    #[allow(dead_code)]
+    pub fn simulate_rule_set_counts(rule_set: &RuleSet, dim_len: usize, steps: usize) -> Vec<usize> {
+        let mut truth_buf: Vec<bool> = Vec::with_capacity((3_usize).pow(dim_len as u32));
+        let mut coord_buf: Vec<i32> = Vec::with_capacity(dim_len);
+        let mut space = Space::new(dim_len);
+        let mut init_cell = Cell::new(dim_len);
+        init_cell.set();
+        space.push_cell(&init_cell);
+
+        let mut counts = vec![space.get_set_count()];
+        for _ in 0..steps {
+            Self::advance_rule_set(rule_set, &mut space, &mut truth_buf, &mut coord_buf);
+            counts.push(space.get_set_count());
+        }
+        counts
+    }
+
     pub fn explore_rule_sets(&self) -> bool {
         for dim_len in self.min_dimensions..=self.max_dimensions {
             let num_neighbors = (3_usize).pow(dim_len as u32);
@@ -296,16 +328,7 @@ impl StateExplorer {
                                 all_matched = false;
                                 break;
                             }
-                            space.generate_next_iteration();
-                            let mut modified_cells: Vec<Cell> = Vec::with_capacity(space.len());
-                            for existing_cell in space.cells.iter() {
-                                let mut c = existing_cell.clone();
-                                Self::apply_rule_set(&rule_set, &mut c, &space, &mut truth_buf, &mut coord_buf);
-                                modified_cells.push(c);
-                            }
-                            for c in modified_cells.iter() {
-                                space.push_cell(c);
-                            }
+                            Self::advance_rule_set(&rule_set, &mut space, &mut truth_buf, &mut coord_buf);
                         }
 
                         if all_matched {
@@ -399,7 +422,8 @@ impl StateExplorer {
 #[cfg(test)]
 mod test {
     use super::*;
-
+    use crate::lattice::Neighbourhood;
+    use crate::reference::{reference_counts, splitmix64, RuleFn};
 
     #[test]
     fn test_is_rule_applicable() {
@@ -428,5 +452,104 @@ mod test {
 
         let explorer = StateExplorer::new(1, 1, vec![1, 3, 5, 7, 9, 11, 13, 15]);
         assert_eq!(explorer.explore_rule_sets(), true);
+    }
+
+    /// Truth table of an expression over [self, neighbour bits...], with `self` fixed.
+    fn tabulate(node: &OpNode, neighbours: usize, self_state: bool) -> Vec<bool> {
+        (0..(1u64 << neighbours))
+            .map(|mask| {
+                let mut values = vec![self_state];
+                values.extend((0..neighbours).map(|j| (mask >> j) & 1 == 1));
+                node.evaluate(&values, true)
+            })
+            .collect()
+    }
+
+    /// Expression variants at spread-out positions of the structure enumeration, so that random
+    /// windows from them include rules that actually fire from a single neighbour.
+    fn base_nodes(dim: usize, stride: usize) -> Vec<OpNode> {
+        let mut node = OpNode::new(0, (3usize).pow(dim as u32) - 1);
+        let mut bases = vec![node.clone()];
+        for _ in 0..3 {
+            for _ in 0..stride {
+                if node.has_next() {
+                    node.generate_next();
+                }
+            }
+            bases.push(node.clone());
+        }
+        bases
+    }
+
+    fn randomise(bases: &[OpNode], seed: &mut u64, window: u64) -> OpNode {
+        *seed = splitmix64(*seed);
+        let mut node = bases[(*seed % bases.len() as u64) as usize].clone();
+        *seed = splitmix64(*seed);
+        for _ in 0..(*seed % window) {
+            if node.has_next() {
+                node.generate_next();
+            }
+        }
+        *seed = splitmix64(*seed);
+        for _ in 0..(*seed % 400) {
+            if node.has_next_eval_permutation() {
+                node.generate_next_eval_permutation();
+            }
+        }
+        node
+    }
+
+    struct TableRule {
+        birth: Vec<bool>,
+        survive: Vec<bool>,
+    }
+
+    impl RuleFn for TableRule {
+        fn birth(&self, mask: u64) -> bool {
+            self.birth[mask as usize]
+        }
+
+        fn survive(&self, mask: u64) -> bool {
+            self.survive[mask as usize]
+        }
+    }
+
+    #[test]
+    fn legacy_space_engine_agrees_with_reference_simulator() {
+        // Random expression rule sets (structure and permutation) from the legacy generators are
+        // tabulated and simulated by both engines. Rules whose birth table fires on an empty
+        // neighbourhood are skipped: the legacy engine only updates cells it has materialised, so
+        // its behaviour there is an artefact rather than a cellular automaton.
+        let mut seed = 12345u64;
+        // One dimension has exactly 32 expression variants; in the plane the structure
+        // enumeration is walked to a few spread-out positions and sampled from there.
+        for (dim, stride, window, samples) in [(1usize, 8usize, 8u64, 300), (2, 100_000, 600, 2500)] {
+            let neighbours = (3usize).pow(dim as u32) - 1;
+            let nb = Neighbourhood::moore(dim, 1).unwrap();
+            let bases = base_nodes(dim, stride);
+            let mut compared = 0;
+            let mut multi_cell = 0;
+            for _ in 0..samples {
+                let mut rule_set = RuleSet::new(dim);
+                rule_set.birth_condition = randomise(&bases, &mut seed, window);
+                rule_set.survival_condition = randomise(&bases, &mut seed, window);
+                let rule = TableRule {
+                    birth: tabulate(&rule_set.birth_condition, neighbours, false),
+                    survive: tabulate(&rule_set.survival_condition, neighbours, true),
+                };
+                if rule.birth[0] {
+                    continue;
+                }
+                let legacy = StateExplorer::simulate_rule_set_counts(&rule_set, dim, 6);
+                let reference = reference_counts(&nb, &rule, 6);
+                assert_eq!(legacy, reference, "dimension {}", dim);
+                compared += 1;
+                if reference.iter().any(|&c| c > 1) {
+                    multi_cell += 1;
+                }
+            }
+            assert!(compared > 40, "dimension {}: only {} comparable rule sets", dim, compared);
+            assert!(multi_cell >= 10, "dimension {}: only {} non-trivial evolutions", dim, multi_cell);
+        }
     }
 }
