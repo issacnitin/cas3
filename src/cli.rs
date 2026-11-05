@@ -3,6 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::analysis::{arity_scan, complexity_profile, legacy_expression_variants};
+use crate::construct::{
+    prepared_prime_output_config, prime_mass_trace, BlockCodec, LocalRule,
+    PreparedPrimeOutputRule, TAIL_BASE, TAIL_RESIDUES,
+};
 use crate::dashboard;
 use crate::lattice::Neighbourhood;
 use crate::progress::Progress;
@@ -26,6 +30,8 @@ COMMANDS:
               L terms, for every L. Flat curve = a real generator; steady growth = memorising.
     scan      Run `search` on every r-subset of the Moore neighbourhood (up to symmetry),
               r = 1..max-arity: all rules that depend on at most r neighbours.
+    construct Verify the weighted split/tail recurrence for a constructive prime population
+              machine and report the binary block budget needed by each prime gap.
     space     Compare the legacy search-space size with the new one, per dimension
     legacy    The original expression-tree enumeration (only practical in dimension 1)
     help      Show this message
@@ -58,6 +64,11 @@ OPTIONS (scan):
     --universe-radius R     draw the neighbours from the Moore block of this radius
                                                                        [default: 1]
     --verbose               print every neighbour class
+
+OPTIONS (construct):
+    --steps N               number of prime-population transitions          [default: 100]
+    --weight W              ON cells in each ordinary logical block         [default: 4]
+    --show K                print up to K transitions                         [default: 8]
 
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
@@ -539,8 +550,89 @@ fn run_space(opts: &Options) -> Result<(), String> {
             tables
         );
     }
+
     println!("legacy structures exclude the input permutations tried for every structure;");
     println!("the new engine never enumerates tables: it branches only on entries a simulation consults.");
+    Ok(())
+}
+
+fn run_construct(opts: &Options) -> Result<(), String> {
+    let steps = opts.number::<usize>("steps")?.unwrap_or(100);
+    let weight = opts.number::<usize>("weight")?.unwrap_or(4);
+    let show = opts.number::<usize>("show")?.unwrap_or(8);
+    let trace = prime_mass_trace(steps, weight)?;
+    let output_steps = if weight == 4 {
+        let codec = BlockCodec::with_tail_states(TAIL_BASE, TAIL_RESIDUES)?;
+        let rule = PreparedPrimeOutputRule;
+        trace
+            .iter()
+            .filter(|transition| transition.before.ordinary_blocks > 0)
+            .try_fold(0usize, |verified, transition| {
+                let current = prepared_prime_output_config(transition, weight)?;
+                if codec.logical_weight(&current)? != transition.before.population {
+                    return Err("prepared output pattern has the wrong population".to_string());
+                }
+                let next = rule.step(&current)?;
+                if codec.logical_weight(&next)? != transition.after.population {
+                    return Err(format!(
+                        "local output gate failed at prime transition {}",
+                        transition.index
+                    ));
+                }
+                Ok(verified + 1)
+            })?
+    } else {
+        0
+    };
+    println!("constructive population certificate (not a prime scheduler):");
+    println!("  dimension       : 2");
+    println!("  transitions     : {}", trace.len());
+    println!("  ordinary weight : {} ON cells per block", weight);
+    println!("  first population: 1");
+    println!(
+        "  last population : {}",
+        trace
+            .last()
+            .map(|s| s.after.population)
+            .unwrap_or(1)
+    );
+    println!();
+    println!(
+        "{:>5} {:>9} {:>9} {:>7} {:>10} {:>10} {:>9}",
+        "t", "before", "after", "gap", "blocks->", "tail->", "tail Δ"
+    );
+    for step in trace.iter().take(show) {
+        println!(
+            "{:>5} {:>9} {:>9} {:>7} {:>4}->{:<5} {:>4}->{:<5} {:>+9}",
+            step.index,
+            step.before.population,
+            step.after.population,
+            step.prime_gap,
+            step.before.ordinary_blocks,
+            step.after.ordinary_blocks,
+            step.before.tail_weight,
+            step.after.tail_weight,
+            step.tail_delta
+        );
+    }
+    if trace.len() > show {
+        println!("  ... {} more exact transitions omitted", trace.len() - show);
+    }
+    let max_gap = trace.iter().map(|s| s.prime_gap).max().unwrap_or(0);
+    println!();
+    println!(
+        "mass invariant: exact for every displayed and omitted transition; largest prime gap = {}",
+        max_gap
+    );
+    if weight == 4 {
+        println!(
+            "local split/tail gate: exact for all {} post-bootstrap transitions",
+            output_steps
+        );
+    } else {
+        println!("local split/tail gate: available only for the implemented frame weight 4");
+    }
+    println!("scheduler status: still a separate local finite-state proof obligation; finite trace only checks population accounting");
     Ok(())
 }
 
@@ -598,6 +690,7 @@ pub fn run() {
         "search" => parse_options(&args[1..]).and_then(|o| run_search(&o)),
         "profile" => parse_options(&args[1..]).and_then(|o| run_profile(&o)),
         "scan" => parse_options(&args[1..]).and_then(|o| run_scan(&o)),
+        "construct" => parse_options(&args[1..]).and_then(|o| run_construct(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {

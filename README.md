@@ -134,6 +134,7 @@ cargo run --release -- search  --dim 3 --neighbourhood vonneumann  # longest pri
 cargo run --release -- profile --dim 2 --terms 13                  # minimal rule size per prefix length
 cargo run --release -- profile --dim 2 --target squares --terms 12 # a control sequence
 cargo run --release -- scan    --dim 2 --max-arity 4 --terms 10    # every rule using at most 4 neighbours
+cargo run --release -- construct --steps 5000 --show 8             # weighted prime-gap accounting certificate
 cargo run --release -- space   --max-dim 3                         # legacy search-space sizes
 cargo run --release -- legacy  --min-dim 1 --max-dim 1             # the original expression search (dimension 2 needs ~3.8e13 expression pairs and is refused unless --force)
 ```
@@ -173,6 +174,74 @@ The capacity of a class grows with its table size and hardly with the geometry (
 
 Classes that cannot be exhausted with this engine (the cost grew about 200,000 times from 4 to 5 neighbours): 6 or more neighbours, the full 2D Moore class with free survival or with cells that die every step, 3D beyond 4 neighbours, and anything with more than two states. For these the search can only fit prefixes. A positive answer for the population reading would have to be constructed (for instance by turning a time-signal generator into a population counter), not found by enumeration.
 
+## Constructive route
+
+`src/construct.rs` implements the part of the population construction that is independent of
+primality.  A finite-state logical CA is encoded in disjoint binary blocks.  Each ordinary active
+state has the same four ON cells: a self-synchronising `101 / 010` frame and one payload bit.
+Changing logical states therefore does not change the binary population.  `BlockMachine` also has
+a per-output-cell local path; its sparse binary transition is checked against the direct logical
+block transition.
+
+For an ordinary block weight \(W\), write
+
+\[
+p_t = Wm_t + h_t,\qquad
+W \le h_t < 2W
+\]
+
+after a finite bootstrap (when \(p_t<W\), the tail is the bootstrap itself).  The next population
+is produced with \(k_t=m_{t+1}-m_t\) split blocks and a bounded tail transition:
+
+\[
+p_{t+1}-p_t = Wk_t + (h_{t+1}-h_t).
+\]
+
+`construct --steps N` checks this equation for \(N\) independently generated prime gaps.  The
+`PreparedPrimeOutputRule` is local: ordinary blocks can carry a prepared `split` and `tail
+residue` request label; each labelled parent survives and births exactly one ordinary child
+immediately to its east, while the adjacent framed tail changes to the requested residue.  The
+framed and per-cell binary compiler is tested on this complete output transition.
+
+The work is deliberately split at a hard boundary: **the code does not contain a prime scheduler
+yet**.  A finite-state local scheduler must remain sufficiently far ahead that, at generation
+\(t\), it has prepared \(k_t\) split labels and the next tail state.  It must do so for unbounded
+prime gaps, with a bounded-state pipelined sieve/ordered result compactor and no host-side oracle.
+`construct` therefore reports a population accounting certificate, not a population-generating
+CA.  A finite run matching the primes is not being presented as proof of the infinite sequence.
+
+### Scheduler design and remaining obstruction
+
+A viable schedule is to launch one binary trial-division worker for integer \(n\) near physical
+time
+
+\[
+L(n)=\left\lfloor\frac{n}{8(1+\log_2 n)}\right\rfloor.
+\]
+
+The worker keeps \(n\) and a divisor in \(O(\log n)\) finite-state tape cells and has an
+\(O(\sqrt n\,(\log n)^2)\) local-step bound.  Since \(L(n)\) is \(o(\pi(n))\) and the same is true
+of the worker bound, for all sufficiently large \(n\) the result exists strictly before output
+index \(\pi(n)\).  Thus a candidate does not have to finish in one CA generation: a pipelined
+ordered buffer can retain every completed result until its integer position is reached.  The
+launch rate is \(O(\log n)\), the concurrent trial-division footprint is
+\(O(\sqrt n\,(\log n)^4)=o(n)\), and candidate results can be packed into finite large-state
+blocks.  The parallel prefix/compaction and binary-to-split-mask networks only need logarithmic
+pipeline depth.  After a finite threshold, their fixed constants can therefore be made smaller
+than the ordinary-block budget \(p_t/4\); all earlier configurations are a finite bootstrap.
+
+This gives the exact finite-state network obligations, but it is not yet the implemented CA:
+launching workers, ordered compaction and spatial reservation still need concrete local transition
+tables, a proof that the result buffer is nonempty at every output step, and a finite bootstrap
+checked through the hand-off.  No claim that the population-generating rule exists is complete
+until those tables and the induction are present.
+
 ## Current status
 
-The original expression search still only gets as far as the 2nd dimension if you run it long enough. The rule-table search answers the prefix question exactly for much larger classes than that: in every class tried, short prefixes of the primes can be matched but no compact rule was found, and the minimum description length of the prime prefixes keeps growing. I still have a feeling it requires 137 dimensions :)
+The original expression search still only gets as far as the 2nd dimension if you run it long
+enough.  The rule-table search answers the prefix question exactly for much larger classes than
+that: in every class tried, short prefixes of the primes can be matched but no compact rule was
+found, and the minimum description length of the prime prefixes keeps growing.  The constructive
+answer is now reduced to one open component: a real-time, finite-local prime scheduler that can
+feed the proven split/tail protocol.  The whole population question remains open until that
+component and its all-\(t\) induction are complete.

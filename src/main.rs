@@ -13,6 +13,7 @@ mod progress;
 mod reference;
 mod sequences;
 mod table_search;
+mod construct;
 mod cli;
 
 fn main() {
