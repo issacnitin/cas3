@@ -14,6 +14,7 @@ mod reference;
 mod sequences;
 mod table_search;
 mod construct;
+mod bootstrap;
 mod prime_worker;
 mod scheduler;
 mod cli;

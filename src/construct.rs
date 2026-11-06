@@ -541,6 +541,22 @@ impl<R: LocalRule> BlockMachine<R> {
         BinaryConfig::from([(0, 0)])
     }
 
+    /// Worst-case dependency of `next_binary_bit`, including isolated-seed recognition.
+    pub fn locality_radius(&self) -> i32 {
+        self.codec
+            .radius()
+            .checked_mul(2)
+            .expect("framed block radius is bounded by the codec constructor")
+    }
+
+    pub fn has_framed_block_near(
+        &self,
+        point: LogicalPoint,
+        current: &BinaryConfig,
+    ) -> Result<bool, String> {
+        Ok(!self.active_anchors_near(current, point)?.is_empty())
+    }
+
     pub fn initial_logical(&self) -> LogicalConfig {
         LogicalConfig::from([((0, 0), 1)])
     }

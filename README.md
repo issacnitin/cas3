@@ -264,6 +264,14 @@ incoming pulses can be accepted on consecutive steps and settle to the exact bin
 `BinarySubtractRule` is the complementary local primitive for subtracting a previous packed
 prime snapshot from a current snapshot; an east-moving borrow head produces the prime gap.
 
+`src/bootstrap.rs` closes the finite low-population transient independently of the scheduler.
+`BinaryBootstrapRule::compile` records a finite set of full radius-\(R\) binary patterns for the
+transition \(1\to2\to3\to5\to\cdots\to p_T\), including false outputs.  Its `step` method is one
+homogeneous rule: it uses an exceptional local pattern when present and otherwise calls the
+framed block compiler.  Tests show the exact prime-prefix bootstrap and a handoff into a
+weight-seven framed tail state.  A later scheduler must still satisfy the tail/allocator
+invariants at that handoff point; the bootstrap does not manufacture scheduler correctness.
+
 These local components still need a physical stream wiring and reset/recycle protocol.  The
 current product rule proves one candidate-to-FIFO handoff, not arbitrary many candidate tiles,
 dynamic tile placement, a double-buffered gap record, or the population-neutral one-seed
