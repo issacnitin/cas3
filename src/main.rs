@@ -14,6 +14,8 @@ mod reference;
 mod sequences;
 mod table_search;
 mod construct;
+mod prime_worker;
+mod scheduler;
 mod cli;
 
 fn main() {

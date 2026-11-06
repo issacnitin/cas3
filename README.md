@@ -135,6 +135,9 @@ cargo run --release -- profile --dim 2 --terms 13                  # minimal rul
 cargo run --release -- profile --dim 2 --target squares --terms 12 # a control sequence
 cargo run --release -- scan    --dim 2 --max-arity 4 --terms 10    # every rule using at most 4 neighbours
 cargo run --release -- construct --steps 5000 --show 8             # weighted prime-gap accounting certificate
+cargo run --release -- worker --candidate 97                       # autonomous distributed trial division
+cargo run --release -- candidate --candidate 97                    # 2D parallel divisor tile
+cargo run --release -- pipeline --start 4 --lanes 2 --steps 220     # ordered CA-classification diagnostic
 cargo run --release -- space   --max-dim 3                         # legacy search-space sizes
 cargo run --release -- legacy  --min-dim 1 --max-dim 1             # the original expression search (dimension 2 needs ~3.8e13 expression pairs and is refused unless --force)
 ```
@@ -209,6 +212,62 @@ yet**.  A finite-state local scheduler must remain sufficiently far ahead that, 
 prime gaps, with a bounded-state pipelined sieve/ordered result compactor and no host-side oracle.
 `construct` therefore reports a population accounting certificate, not a population-generating
 CA.  A finite run matching the primes is not being presented as proof of the infinite sequence.
+
+### Autonomous scheduler primitives
+
+`src/prime_worker.rs` now contains an actual finite-state rule for the arithmetic core.  A tape
+cell stores four binary registers (`n`, divisor, divisor square, remainder), boundary/cursor bits,
+and one of a finite set of control phases.  The head performs compare/subtract/add rewrites using
+only west/east neighbours.  Every tape cell remains active while the head moves, so logical state
+changes preserve its block count.
+
+`PrimeWorker` classifies one candidate serially over divisors.  `DivisorWorker` fixes a divisor;
+`ParallelCandidate` lays out one such worker per divisor \(2\ldots\sqrt n\), and a vertical
+finite-state reducer produces `CandidatePrime` or `CandidateComposite`.  `ParallelCandidateField`
+tests several tiles under one synchronous application of the same local rule.  No host primality
+test is consulted after the binary tile is constructed.
+
+The one-dimensional stack of divisor rows is now retained only as a simple reference.  The
+constructed layout is `MeshCandidate`: its \(\Theta(\sqrt n)\) workers are packed in an
+\(n^{1/4}\times n^{1/4}\) rectangle.  An active row wire waits at each divisor result and an
+active column wire performs the second AND reduction.  The tile has
+\(O(\sqrt n\log n)\) cells and \(O(n^{1/4}\log n+\log^2 n)\) causal latency.  Launching
+\(\Theta(\log n)\) candidates per physical step therefore keeps
+
+\[
+O(\sqrt n\log n)\,O(n^{1/4}\log n)\,O(\log n)
+  =O(n^{3/4}\log^3 n)=o(n)
+\]
+
+ordinary scheduler blocks in flight after a finite threshold.  This repairs the resource bound
+that a stack of divisor rows could not satisfy.
+
+The source half of the pipeline is also finite-state: `BinaryCounter` increments a distributed
+binary word and births a new high bit on overflow; a stride-counter bank emits contiguous batches.
+The `pipeline` command is deliberately named a diagnostic: Rust still performs tile placement and
+ordered release while the workers and counters use local CA transitions.  It verifies that the
+CA-derived classifications are correct and ordered, but this is not yet a one-seed rule.
+
+`src/scheduler.rs` adds two more local CA components.  `OrderedFifoRule` gives every candidate
+slot a pending/prime/composite state and moves a head only into the immediately following ready
+slot; `IntegratedSchedulerRule` combines that FIFO alphabet with `PrimeWorkerRule`, so a mesh
+result directly south of the head becomes the slot's result.  `GapCounterRule` is a pipelined
+binary incrementer: one release pulse toggles the LSB, carry bits travel east one cell per step,
+and a later prime pulse performs the final `+1`.  The `scheduler` command verifies one mesh
+classification, FIFO release and pulse count under one synchronous tagged CA rule.
+
+`TravelingCounterRule` removes the fixed register/reset assumption.  A complete active rectangle
+contains one information column and padding elsewhere; every release shifts the information
+column one step east and converts the vacated source column to padding.  The number of active
+logical cells therefore stays constant.  Carries enter diagonally from the southwest, so 500
+incoming pulses can be accepted on consecutive steps and settle to the exact binary value.
+`BinarySubtractRule` is the complementary local primitive for subtracting a previous packed
+prime snapshot from a current snapshot; an east-moving borrow head produces the prime gap.
+
+These local components still need a physical stream wiring and reset/recycle protocol.  The
+current product rule proves one candidate-to-FIFO handoff, not arbitrary many candidate tiles,
+dynamic tile placement, a double-buffered gap record, or the population-neutral one-seed
+bootstrap.
 
 ### Scheduler design and remaining obstruction
 

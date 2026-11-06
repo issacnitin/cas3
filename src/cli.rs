@@ -4,15 +4,19 @@ use std::time::Duration;
 
 use crate::analysis::{arity_scan, complexity_profile, legacy_expression_variants};
 use crate::construct::{
-    prepared_prime_output_config, prime_mass_trace, BlockCodec, LocalRule,
-    PreparedPrimeOutputRule, TAIL_BASE, TAIL_RESIDUES,
+    prepared_prime_output_config, prime_mass_trace, BlockCodec, LocalRule, PreparedPrimeOutputRule,
+    TAIL_BASE, TAIL_RESIDUES,
 };
 use crate::dashboard;
 use crate::lattice::Neighbourhood;
+use crate::prime_worker::{
+    CandidateBatchPipeline, CandidateResult, MeshCandidate, ParallelCandidate, PrimeWorker,
+};
 use crate::progress::Progress;
 use crate::reference::{
     pattern_to_string, reference_states, render_evolution, verify_solution, SolutionRule,
 };
+use crate::scheduler::IntegratedCandidate;
 use crate::sequences::parse_target;
 use crate::state_explorer::StateExplorer;
 use crate::table_search::{search, SearchParams, SearchReport, Solution, StopReason, SurvivalMode};
@@ -32,6 +36,11 @@ COMMANDS:
               r = 1..max-arity: all rules that depend on at most r neighbours.
     construct Verify the weighted split/tail recurrence for a constructive prime population
               machine and report the binary block budget needed by each prime gap.
+    worker    Run the finite-state local trial-division CA on one binary candidate
+    candidate Run a 2D parallel-divisor candidate tile with a local result reducer
+    mesh      Run the compact n^(1/4)-diameter parallel candidate mesh
+    pipeline  Diagnostic ordered stream of candidates classified by local CA tiles
+    scheduler Run one mesh candidate and release it through the integrated local FIFO
     space     Compare the legacy search-space size with the new one, per dimension
     legacy    The original expression-tree enumeration (only practical in dimension 1)
     help      Show this message
@@ -70,6 +79,28 @@ OPTIONS (construct):
     --weight W              ON cells in each ordinary logical block         [default: 4]
     --show K                print up to K transitions                         [default: 8]
 
+OPTIONS (worker):
+    --candidate N           integer to classify                                [required]
+    --max-steps N           local CA-step safety limit                  [default: 2000000]
+
+OPTIONS (candidate):
+    --candidate N           integer to classify                                [required]
+    --max-steps N           local CA-step safety limit                    [default: 500000]
+
+OPTIONS (mesh):
+    --candidate N           integer to classify                                [required]
+    --max-steps N           local CA-step safety limit                    [default: 500000]
+
+OPTIONS (pipeline):
+    --start N               first candidate to launch                          [default: 4]
+    --lanes N               candidates in each autonomous counter batch       [default: 4]
+    --steps N               pipeline scheduling cycles                         [default: 200]
+    --show K                print up to K returned prime records                   [default: 8]
+
+OPTIONS (scheduler):
+    --candidate N           integer to classify and release                    [required]
+    --max-steps N           local CA-step safety limit                    [default: 500000]
+
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
 
@@ -83,7 +114,14 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 6] = ["no-symmetry", "first", "sequential", "hold", "verbose", "force"];
+const FLAG_NAMES: [&str; 6] = [
+    "no-symmetry",
+    "first",
+    "sequential",
+    "hold",
+    "verbose",
+    "force",
+];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut values = HashMap::new();
@@ -109,7 +147,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 
 impl Options {
     fn text(&self, name: &str, default: &str) -> String {
-        self.values.get(name).cloned().unwrap_or_else(|| default.to_string())
+        self.values
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
     }
 
     fn number<T: std::str::FromStr>(&self, name: &str) -> Result<Option<T>, String> {
@@ -134,7 +175,11 @@ fn build_neighbourhood(opts: &Options) -> Result<Neighbourhood, String> {
             .split(';')
             .map(|o| {
                 o.split(',')
-                    .map(|x| x.trim().parse::<i32>().map_err(|_| format!("bad offset '{}'", o)))
+                    .map(|x| {
+                        x.trim()
+                            .parse::<i32>()
+                            .map_err(|_| format!("bad offset '{}'", o))
+                    })
                     .collect::<Result<Vec<i32>, String>>()
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -167,7 +212,9 @@ fn build_params(opts: &Options) -> Result<SearchParams, String> {
     params.parallel = !opts.flag("sequential");
     params.threads = opts.number::<usize>("threads")?;
     params.max_entries = opts.number::<usize>("max-entries")?;
-    params.time_limit = opts.number::<f64>("time-limit")?.map(Duration::from_secs_f64);
+    params.time_limit = opts
+        .number::<f64>("time-limit")?
+        .map(Duration::from_secs_f64);
     params.node_limit = opts.number::<u64>("node-limit")?;
     params.store_limit = opts.number::<usize>("show")?.unwrap_or(3);
     Ok(params)
@@ -242,14 +289,20 @@ fn run_search(opts: &Options) -> Result<(), String> {
         params.survival
     );
     let nb = &params.neighbourhood;
-    println!("neighbourhood : dim {} with {} neighbours", nb.dim, nb.len());
+    println!(
+        "neighbourhood : dim {} with {} neighbours",
+        nb.dim,
+        nb.len()
+    );
     println!("target        : {:?}", params.target);
     println!("survival      : {:?}", params.survival);
     println!(
         "unrestricted rule space: 2^{} tables",
         SearchReport::space_bits(nb.len(), params.survival)
     );
-    if let Some(term) = crate::bounds::first_light_cone_violation(nb.dim, nb.radius() as usize, &params.target) {
+    if let Some(term) =
+        crate::bounds::first_light_cone_violation(nb.dim, nb.radius() as usize, &params.target)
+    {
         println!(
             "note         : term {} of the target ({}) exceeds the light-cone limit of {}: no rule of this neighbourhood can reach it",
             term,
@@ -352,7 +405,10 @@ fn run_profile(opts: &Options) -> Result<(), String> {
         params.target
     );
     println!("minimal number of table entries a rule must consult to reproduce the first L terms");
-    println!("{:>4} {:>6} {:>12} {:>5} {:>14} {:>10}", "L", "term", "min entries", "+", "nodes", "time");
+    println!(
+        "{:>4} {:>6} {:>12} {:>5} {:>14} {:>10}",
+        "L", "term", "min entries", "+", "nodes", "time"
+    );
 
     let mut previous: Option<usize> = None;
     let rows = complexity_profile(&params, 2, last, entry_cap, attempt_limit, |row| {
@@ -414,7 +470,10 @@ fn run_profile(opts: &Options) -> Result<(), String> {
         let solution = row.solution.as_ref().unwrap();
         let target = &params.target[..row.terms];
         let verified = verify_solution(&nb, target, solution, params.survival, 16);
-        println!("  re-verified with the reference simulator: {}", if verified { "ok" } else { "FAILED" });
+        println!(
+            "  re-verified with the reference simulator: {}",
+            if verified { "ok" } else { "FAILED" }
+        );
         let mut shown = params.clone();
         shown.target = target.to_vec();
         print_solution(&nb, &shown, solution);
@@ -427,7 +486,10 @@ fn run_scan(opts: &Options) -> Result<(), String> {
     let progress = start_dashboard(opts)?;
     let mut params = build_params(opts)?;
     params.store_limit = 0;
-    params.label = format!("scan · dim {} · {:?} survival", params.neighbourhood.dim, params.survival);
+    params.label = format!(
+        "scan · dim {} · {:?} survival",
+        params.neighbourhood.dim, params.survival
+    );
     let min_arity = opts.number::<usize>("min-arity")?.unwrap_or(1);
     let max_arity = opts.number::<usize>("max-arity")?.unwrap_or(4);
     let universe_radius = opts.number::<i32>("universe-radius")?.unwrap_or(1);
@@ -438,21 +500,36 @@ fn run_scan(opts: &Options) -> Result<(), String> {
         dim, universe_radius, min_arity, max_arity
     );
     println!("target {:?}, survival {:?}", params.target, params.survival);
-    if let Some(term) = crate::bounds::first_light_cone_violation(dim, universe_radius as usize, &params.target) {
+    if let Some(term) =
+        crate::bounds::first_light_cone_violation(dim, universe_radius as usize, &params.target)
+    {
         println!(
             "note: term {} of the target ({}) exceeds what any rule of radius {} can reach in {} dimension(s) (light cone)",
             term, params.target[term], universe_radius, dim
         );
     }
 
-    let summaries = arity_scan(&params, min_arity..=max_arity, universe_radius, progress.clone(), |class| {
-        if verbose {
-            let offsets: Vec<String> = class
-                .offsets
-                .iter()
-                .map(|o| format!("({})", o.iter().map(|x| format!("{:+}", x)).collect::<Vec<_>>().join(",")))
-                .collect();
-            println!(
+    let summaries = arity_scan(
+        &params,
+        min_arity..=max_arity,
+        universe_radius,
+        progress.clone(),
+        |class| {
+            if verbose {
+                let offsets: Vec<String> = class
+                    .offsets
+                    .iter()
+                    .map(|o| {
+                        format!(
+                            "({})",
+                            o.iter()
+                                .map(|x| format!("{:+}", x))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    })
+                    .collect();
+                println!(
                 "  r={} class {:>3}/{:<3} prefix {:>2} terms, {:>10} solution classes, {:>10} nodes {:>9.2?}{}  {}",
                 class.arity,
                 class.index + 1,
@@ -464,20 +541,21 @@ fn run_scan(opts: &Options) -> Result<(), String> {
                 if class.complete { "" } else { " (limit)" },
                 offsets.join(" ")
             );
-        }
-        if let Some(p) = &progress {
-            if class.solutions > 0 || class.index + 1 == class.classes_in_arity {
-                p.push_history(format!(
-                    "r={} class {}/{}: prefix {} terms, {} solution classes",
-                    class.arity,
-                    class.index + 1,
-                    class.classes_in_arity,
-                    class.matched_terms,
-                    class.solutions
-                ));
             }
-        }
-    })?;
+            if let Some(p) = &progress {
+                if class.solutions > 0 || class.index + 1 == class.classes_in_arity {
+                    p.push_history(format!(
+                        "r={} class {}/{}: prefix {} terms, {} solution classes",
+                        class.arity,
+                        class.index + 1,
+                        class.classes_in_arity,
+                        class.matched_terms,
+                        class.solutions
+                    ));
+                }
+            }
+        },
+    )?;
 
     println!();
     println!(
@@ -487,19 +565,34 @@ fn run_scan(opts: &Options) -> Result<(), String> {
     let total = params.target.len();
     for s in &summaries {
         let verdict = if s.incomplete > 0 {
-            format!("partial: {} classes hit a limit, prefix {} is a lower bound", s.incomplete, s.best_matched)
+            format!(
+                "partial: {} classes hit a limit, prefix {} is a lower bound",
+                s.incomplete, s.best_matched
+            )
         } else if s.best_matched < total {
-            format!("DEAD: no rule with at most {} neighbours generates more than {} terms", s.arity, s.best_matched)
+            format!(
+                "DEAD: no rule with at most {} neighbours generates more than {} terms",
+                s.arity, s.best_matched
+            )
         } else {
             format!("alive: some rule reproduces all {} target terms", total)
         };
         println!(
             "{:>5} {:>8} {:>16} {:>9}/{:<2} {:>14} {:>10.2?}  {}",
-            s.arity, s.classes, s.with_solutions, s.best_matched, total, s.nodes, s.elapsed, verdict
+            s.arity,
+            s.classes,
+            s.with_solutions,
+            s.best_matched,
+            total,
+            s.nodes,
+            s.elapsed,
+            verdict
         );
     }
     println!("best prefix = the most terms of the target that any rule with at most r neighbours can reproduce;");
-    println!("DEAD classes are proven: a rule generating the whole sequence would match every prefix.");
+    println!(
+        "DEAD classes are proven: a rule generating the whole sequence would match every prefix."
+    );
     if let Some(p) = &progress {
         let best = summaries.iter().map(|s| s.best_matched).max().unwrap_or(0);
         let cut_short: usize = summaries.iter().map(|s| s.incomplete).sum();
@@ -529,7 +622,11 @@ fn run_space(opts: &Options) -> Result<(), String> {
     let max_dim = opts.number::<usize>("max-dim")?.unwrap_or(3);
     println!(
         "{:>3} {:>7} {:>28} {:>26} {:>26}",
-        "dim", "inputs", "legacy structures / function", "legacy (birth, survival)", "unrestricted tables"
+        "dim",
+        "inputs",
+        "legacy structures / function",
+        "legacy (birth, survival)",
+        "unrestricted tables"
     );
     for dim in 1..=max_dim {
         let inputs = (3usize).pow(dim as u32);
@@ -537,7 +634,10 @@ fn run_space(opts: &Options) -> Result<(), String> {
         let structures = legacy_expression_variants(inputs);
         let pairs = structures.checked_mul(structures);
         let tables = if neighbours <= 62 {
-            format!("2^{}", SearchReport::space_bits(neighbours, SurvivalMode::Free))
+            format!(
+                "2^{}",
+                SearchReport::space_bits(neighbours, SurvivalMode::Free)
+            )
         } else {
             "not supported".to_string()
         };
@@ -546,7 +646,9 @@ fn run_space(opts: &Options) -> Result<(), String> {
             dim,
             inputs,
             structures,
-            pairs.map(|p| format!("{}", p)).unwrap_or_else(|| "> 3.4e38".to_string()),
+            pairs
+                .map(|p| format!("{}", p))
+                .unwrap_or_else(|| "> 3.4e38".to_string()),
             tables
         );
     }
@@ -591,10 +693,7 @@ fn run_construct(opts: &Options) -> Result<(), String> {
     println!("  first population: 1");
     println!(
         "  last population : {}",
-        trace
-            .last()
-            .map(|s| s.after.population)
-            .unwrap_or(1)
+        trace.last().map(|s| s.after.population).unwrap_or(1)
     );
     println!();
     println!(
@@ -616,7 +715,10 @@ fn run_construct(opts: &Options) -> Result<(), String> {
         );
     }
     if trace.len() > show {
-        println!("  ... {} more exact transitions omitted", trace.len() - show);
+        println!(
+            "  ... {} more exact transitions omitted",
+            trace.len() - show
+        );
     }
     let max_gap = trace.iter().map(|s| s.prime_gap).max().unwrap_or(0);
     println!();
@@ -633,6 +735,115 @@ fn run_construct(opts: &Options) -> Result<(), String> {
         println!("local split/tail gate: available only for the implemented frame weight 4");
     }
     println!("scheduler status: still a separate local finite-state proof obligation; finite trace only checks population accounting");
+    Ok(())
+}
+
+fn run_worker(opts: &Options) -> Result<(), String> {
+    let candidate = opts
+        .number::<usize>("candidate")?
+        .ok_or_else(|| "worker needs --candidate N".to_string())?;
+    let max_steps = opts.number::<usize>("max-steps")?.unwrap_or(2_000_000);
+    let mut worker = PrimeWorker::new(candidate)?;
+    let result = worker.run_until_result(max_steps)?;
+    println!("candidate     : {}", candidate);
+    println!("logical cells : {}", worker.config.len());
+    println!("local steps   : {}", worker.steps);
+    println!("CA result     : {:?}", result);
+    println!("active states : finite binary n/d/s/r tape plus one control head");
+    Ok(())
+}
+
+fn run_candidate(opts: &Options) -> Result<(), String> {
+    let candidate = opts
+        .number::<usize>("candidate")?
+        .ok_or_else(|| "candidate needs --candidate N".to_string())?;
+    let max_steps = opts.number::<usize>("max-steps")?.unwrap_or(500_000);
+    let rows = ((candidate as f64).sqrt().floor() as usize).saturating_sub(1);
+    let mut tile = ParallelCandidate::new(candidate)?;
+    let result = tile.run_until_result(max_steps)?;
+    println!("candidate       : {}", candidate);
+    println!("parallel rows   : {}", rows);
+    println!("logical cells   : {}", tile.config.len());
+    println!("local steps     : {}", tile.steps);
+    println!("CA result       : {:?}", result);
+    println!("classification : local remainder workers + vertical finite-state reducer");
+    Ok(())
+}
+
+fn run_mesh(opts: &Options) -> Result<(), String> {
+    let candidate = opts
+        .number::<usize>("candidate")?
+        .ok_or_else(|| "mesh needs --candidate N".to_string())?;
+    let max_steps = opts.number::<usize>("max-steps")?.unwrap_or(500_000);
+    let mut tile = MeshCandidate::new(candidate)?;
+    let result = tile.run_until_result(max_steps)?;
+    println!("candidate       : {}", candidate);
+    println!(
+        "mesh shape      : {} columns x {} rows",
+        tile.columns, tile.rows
+    );
+    println!("logical cells   : {}", tile.config.len());
+    println!("local steps     : {}", tile.steps);
+    println!("CA result       : {:?}", result);
+    println!("classification : row/column local AND wave over parallel divisor tapes");
+    Ok(())
+}
+
+fn run_pipeline(opts: &Options) -> Result<(), String> {
+    let start = opts.number::<usize>("start")?.unwrap_or(4);
+    let lanes = opts.number::<usize>("lanes")?.unwrap_or(4);
+    let steps = opts.number::<usize>("steps")?.unwrap_or(200);
+    let show = opts.number::<usize>("show")?.unwrap_or(8);
+    let mut pipeline = CandidateBatchPipeline::new(start, lanes)?;
+    let mut records = Vec::new();
+    for _ in 0..steps {
+        records.extend(pipeline.step()?);
+    }
+    let primes: Vec<_> = records
+        .iter()
+        .filter(|record| record.result == CandidateResult::Prime)
+        .collect();
+    println!("ordered stream is a diagnostic harness, not a one-seed population CA");
+    println!("scheduling cycles : {}", steps);
+    println!("batch lanes        : {}", lanes);
+    println!("released candidates: {}", records.len());
+    println!("returned primes    : {}", primes.len());
+    println!();
+    println!("{:>7} {:>10} {:>8}", "prime", "launch", "CA steps");
+    for record in primes.iter().take(show) {
+        println!(
+            "{:>7} {:>10} {:>8}",
+            record.candidate,
+            record.launched_at,
+            record.completed_at - record.launched_at
+        );
+    }
+    println!();
+    for pair in primes.windows(2).take(show) {
+        println!(
+            "gap {:>5} -> {:>5} = {}",
+            pair[0].candidate,
+            pair[1].candidate,
+            pair[1].candidate - pair[0].candidate
+        );
+    }
+    Ok(())
+}
+
+fn run_scheduler(opts: &Options) -> Result<(), String> {
+    let candidate = opts
+        .number::<usize>("candidate")?
+        .ok_or_else(|| "scheduler needs --candidate N".to_string())?;
+    let max_steps = opts.number::<usize>("max-steps")?.unwrap_or(500_000);
+    let mut scheduler = IntegratedCandidate::new(candidate)?;
+    let result = scheduler.run_until_release(max_steps)?;
+    scheduler.settle_gap()?;
+    println!("candidate       : {}", candidate);
+    println!("logical cells   : {}", scheduler.config.len());
+    println!("local steps     : {}", scheduler.steps);
+    println!("FIFO release    : {:?}", result);
+    println!("release pulses  : {}", scheduler.gap_value()?);
+    println!("classification and ordered release: one synchronous tagged CA rule");
     Ok(())
 }
 
@@ -691,6 +902,11 @@ pub fn run() {
         "profile" => parse_options(&args[1..]).and_then(|o| run_profile(&o)),
         "scan" => parse_options(&args[1..]).and_then(|o| run_scan(&o)),
         "construct" => parse_options(&args[1..]).and_then(|o| run_construct(&o)),
+        "worker" => parse_options(&args[1..]).and_then(|o| run_worker(&o)),
+        "candidate" => parse_options(&args[1..]).and_then(|o| run_candidate(&o)),
+        "mesh" => parse_options(&args[1..]).and_then(|o| run_mesh(&o)),
+        "pipeline" => parse_options(&args[1..]).and_then(|o| run_pipeline(&o)),
+        "scheduler" => parse_options(&args[1..]).and_then(|o| run_scheduler(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {
@@ -715,13 +931,19 @@ mod test {
 
     #[test]
     fn options_split_into_values_and_flags() {
-        let opts = parse_options(&args(&["--dim", "3", "--first", "--target", "1,2,3", "--hold"])).unwrap();
+        let opts = parse_options(&args(&[
+            "--dim", "3", "--first", "--target", "1,2,3", "--hold",
+        ]))
+        .unwrap();
         assert_eq!(opts.number::<usize>("dim").unwrap(), Some(3));
         assert_eq!(opts.text("target", "primes"), "1,2,3");
         assert!(opts.flag("first") && opts.flag("hold") && !opts.flag("sequential"));
         assert!(parse_options(&args(&["--dim"])).is_err());
         assert!(parse_options(&args(&["dim", "3"])).is_err());
-        assert!(parse_options(&args(&["--dim", "x"])).unwrap().number::<usize>("dim").is_err());
+        assert!(parse_options(&args(&["--dim", "x"]))
+            .unwrap()
+            .number::<usize>("dim")
+            .is_err());
     }
 
     #[test]
@@ -735,8 +957,21 @@ mod test {
 
         let custom = build_params(
             &parse_options(&args(&[
-                "--dim", "2", "--offsets", "1,0;0,1;1,1", "--survival", "always", "--no-symmetry",
-                "--max-entries", "30", "--time-limit", "1.5", "--target", "naturals", "--terms", "5",
+                "--dim",
+                "2",
+                "--offsets",
+                "1,0;0,1;1,1",
+                "--survival",
+                "always",
+                "--no-symmetry",
+                "--max-entries",
+                "30",
+                "--time-limit",
+                "1.5",
+                "--target",
+                "naturals",
+                "--terms",
+                "5",
             ]))
             .unwrap(),
         )
@@ -748,9 +983,14 @@ mod test {
         assert_eq!(custom.time_limit, Some(Duration::from_millis(1500)));
         assert_eq!(custom.target, vec![1, 2, 3, 4, 5]);
 
-        let vn = build_params(&parse_options(&args(&["--dim", "3", "--neighbourhood", "vonneumann"])).unwrap()).unwrap();
+        let vn = build_params(
+            &parse_options(&args(&["--dim", "3", "--neighbourhood", "vonneumann"])).unwrap(),
+        )
+        .unwrap();
         assert_eq!(vn.neighbourhood.len(), 6);
-        assert!(build_params(&parse_options(&args(&["--survival", "sometimes"])).unwrap()).is_err());
+        assert!(
+            build_params(&parse_options(&args(&["--survival", "sometimes"])).unwrap()).is_err()
+        );
         assert!(build_params(&parse_options(&args(&["--neighbourhood", "hex"])).unwrap()).is_err());
     }
 
