@@ -113,7 +113,7 @@ OPTIONS (rolling):
     --max-steps N           local CA-step safety limit                   [default: 2000000]
 
 OPTIONS (epoch):
-    --power K               certify the dyadic interval N=2^K                  [default: 86]
+    --power K               certify the dyadic interval N=2^K                  [default: 88]
 
 OPTIONS (mask):
     --splits K              ordinary four-cell births to synchronize             [default: 7]
@@ -905,7 +905,7 @@ fn run_rolling(opts: &Options) -> Result<(), String> {
 }
 
 fn run_epoch(opts: &Options) -> Result<(), String> {
-    let power = opts.number::<u32>("power")?.unwrap_or(86);
+    let power = opts.number::<u32>("power")?.unwrap_or(88);
     let plan = PrimeEpochPlan::for_power(power)?;
     println!("dyadic recurrent-scheduler certificate:");
     println!("  interval floor       : 2^{}", plan.power);
@@ -920,9 +920,15 @@ fn run_epoch(opts: &Options) -> Result<(), String> {
         plan.scheduler_live_cells, plan.scheduler_fraction
     );
     println!(
-        "  candidate coverage   : {:.6} x next dyadic interval",
+        "  candidate capacity   : {:.6} x next dyadic interval",
+        plan.candidate_capacity
+    );
+    println!(
+        "  admitted coverage    : {:.6} x next dyadic interval",
         plan.candidate_coverage
     );
+    println!("  admitted batches     : {:.3e}", plan.admitted_batches);
+    println!("  admission / epoch    : {:.6}", plan.admission_fraction);
     println!("  max gap / N          : {:.8}", plan.maximum_gap_fraction);
     println!("  mask latency bound   : {:.3e}", plan.mask_latency);
     println!("  mask lead / epoch    : {:.6}", plan.mask_lead_fraction);

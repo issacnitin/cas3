@@ -11,7 +11,7 @@ const GATE_EAST: usize = 2;
 const GATE_SOUTH: usize = 3;
 const GATE_WEST: usize = 4;
 const GATE_ROLE_COUNT: usize = 5;
-const HEAD_TRACK_STATES: usize = ROLE_COUNT * GATE_ROLE_COUNT * 2;
+const HEAD_TRACK_STATES: usize = ROLE_COUNT * GATE_ROLE_COUNT * 3;
 const HEAD_GATE_BASE: usize = 1 + HEAD_TRACK_STATES;
 const HEAD_GATE_STATES: usize = ROLE_COUNT * 2;
 
@@ -130,14 +130,14 @@ pub struct CyclicConveyor {
 struct HeadTrack {
     push: usize,
     gate: usize,
-    head: bool,
+    phase: usize,
 }
 
 pub struct GatedHeadRule;
 
 impl GatedHeadRule {
     fn encode_track(track: HeadTrack) -> usize {
-        1 + ((track.push - 1) * GATE_ROLE_COUNT + track.gate) * 2 + track.head as usize
+        1 + ((track.push - 1) * GATE_ROLE_COUNT + track.gate) * 3 + track.phase
     }
 
     fn decode_track(state: usize) -> Option<HeadTrack> {
@@ -145,12 +145,12 @@ impl GatedHeadRule {
         if raw >= HEAD_TRACK_STATES {
             return None;
         }
-        let head = raw & 1 != 0;
-        let roles = raw / 2;
+        let phase = raw % 3;
+        let roles = raw / 3;
         Some(HeadTrack {
             push: roles / GATE_ROLE_COUNT + 1,
             gate: roles % GATE_ROLE_COUNT,
-            head,
+            phase,
         })
     }
 
@@ -204,7 +204,7 @@ impl LocalRule for GatedHeadRule {
             }
             let track_slot = Pull::direction_slot(track_direction).unwrap();
             return if Self::decode_track(neighbours[track_slot])
-                .map(|track| track.head)
+                .map(|track| track.phase == 2)
                 .unwrap_or(false)
             {
                 Self::encode_gate(track_direction, false)
@@ -216,10 +216,14 @@ impl LocalRule for GatedHeadRule {
         let Some(mut track) = Self::decode_track(center) else {
             return 0;
         };
-        if track.head {
+        if track.phase == 1 {
             if Self::gate_ready(track, neighbours) {
-                track.head = false;
+                track.phase = 2;
             }
+            return Self::encode_track(track);
+        }
+        if track.phase == 2 {
+            track.phase = 0;
             return Self::encode_track(track);
         }
 
@@ -227,7 +231,8 @@ impl LocalRule for GatedHeadRule {
             let Some(predecessor) = Self::decode_track(neighbours[predecessor_slot]) else {
                 continue;
             };
-            if !predecessor.head || !Self::points_to_center(predecessor_slot, predecessor.push) {
+            if predecessor.phase != 2 || !Self::points_to_center(predecessor_slot, predecessor.push)
+            {
                 continue;
             }
             let ready = if predecessor.gate == GATE_NONE {
@@ -239,7 +244,7 @@ impl LocalRule for GatedHeadRule {
                     .unwrap_or(false)
             };
             if ready {
-                track.head = true;
+                track.phase = 1;
                 break;
             }
         }
@@ -281,7 +286,7 @@ impl GatedHeadRing {
                 GatedHeadRule::encode_track(HeadTrack {
                     push,
                     gate,
-                    head: index == 0,
+                    phase: usize::from(index == 0),
                 }),
             );
             let gate_point = match gate {
@@ -328,7 +333,7 @@ impl GatedHeadRing {
             self.config
                 .get(point)
                 .and_then(|state| GatedHeadRule::decode_track(*state))
-                .map(|track| track.head)
+                .map(|track| track.phase != 0)
                 .unwrap_or(false)
         })
     }
@@ -460,10 +465,10 @@ mod tests {
         let active = ring.config.len();
         let length = ring.path.len();
         assert_eq!(ring.head_index(), Some(0));
-        for expected in 1..=length {
+        for step in 1..=2 * length {
             ring.step().unwrap();
             assert_eq!(ring.config.len(), active);
-            assert_eq!(ring.head_index(), Some(expected % length));
+            assert_eq!(ring.head_index(), Some((step / 2) % length));
         }
         for _ in 0..10 {
             ring.step().unwrap();

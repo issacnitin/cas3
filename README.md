@@ -324,30 +324,35 @@ partition the candidate interval.
 \pi(x)\le {x\over\ln x}\left(1+{1.2762\over\ln x}\right).
 \]
 
-It includes a factor-four allowance for builders, merge and recycling, plus two packed,
-self-delimiting gap buffers. The first conservative dyadic epoch passing every implemented check
-is \(N=2^{86}\):
+It includes a factor-four allowance for builders, merge and recycling. A fixed two-phase gate
+admits one batch every other output generation. With \(\lceil5\ln N\rceil\) lanes this overcovers
+\([2N,4N)\) while keeping every worker below a \(5N\) latency bound. Four fixed-width packed
+windows cover two
+rolling mask-lead buffers plus equal active compaction padding. The first conservative dyadic epoch
+passing every implemented check is \(N=2^{88}\):
 
-- 239 candidates per admitted batch;
-- candidate coverage \(1.981394\) times the complete next dyadic interval;
-- scheduler live population \(0.453856N\);
-- complete next-ring construction cost below \(0.312N\);
-- next-epoch ordinary/output reserve above \(0.617N\);
-- explicit maximum prime gap below \(0.00001126N\);
-- worst-case local gap-to-mask decoding below \(0.095\) of one epoch;
-- next-ring construction rate below 4.7 ordinary blocks per generation at the first certified
-  epoch, under 2% of its 239 lane/build heads.
+- 305 candidates per admitted batch;
+- ungated capacity \(2.471777\) times the next dyadic interval;
+- admitted coverage \(1.235889\), using exactly one half of the epoch generations;
+- scheduler live population \(0.446822N\);
+- disjoint next-ring construction cost below \(0.784N\);
+- simultaneous current/next ordinary-output reserve above \(0.384\) of the \(2N\) end population;
+- explicit maximum prime gap below \(0.00002103N\);
+- worst-case local gap-to-mask decoding below \(0.188\) of one epoch;
+- next-ring construction rate below 12.1 ordinary blocks per generation, under 4% of the 305
+  lane/build heads.
 
-The last number uses Dusart's theorem that
+The gap and mask bounds use Dusart's theorem that
 \([x,x+x/(25\ln^2x)]\) contains a prime for \(x\ge396738\). Thus the asymptotic schedule has both
 enough candidate throughput and enough ordinary-block reserve for every required split. The huge
 threshold is acceptable for an existence construction because everything below it can be a
 finite bootstrap; it is not intended as a practical simulation threshold. Run
-`epoch --power 86` to print the certificate.
+`epoch --power 88` to print the certificate.
 
-The builder count is not claimed to stay fixed: with fixed 20-bit packed states it grows only as
-\(O(\log\log N)\), while the epoch supplies \(\Theta(\log N)\) lane/build heads. The certificate
-therefore checks the builder share of the available heads, not a false constant-eight bound.
+The builder count is not claimed to stay fixed. With fixed-width rolling buffers it grows as
+\(O(\log N)\), while the epoch supplies \(\Theta(\log N)\) lane/build heads; the certificate checks
+their ratio. The next ring is budgeted disjointly rather than assuming an unproved in-place
+transformation.
 
 `src/mask_writer.rs` implements that local decoder rather than treating it as a timing oracle. A
 sparse \(O(\log g)\)-cell counter loads a binary split count, decrements it, shifts one cell and

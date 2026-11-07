@@ -242,10 +242,12 @@ pub enum FifoResult {
 
 /// Conservative all-epoch resource certificate for the recurrent batch architecture.
 ///
-/// During the prime interval `[N, 2N]`, one batch is admitted per output generation.  Each batch
-/// has `ceil(4 ln N)` consecutive candidates.  A ring family is revisited only after the serial
-/// trial-division bound below, so its lanes have completed before their next batch.  The ring
-/// footprint includes a factor-four allowance for local builders, ordered merge, and recycling.
+/// During the prime interval `[N, 2N]`, a fixed two-phase clock admits one batch on every other
+/// output generation. Each batch has `ceil(5 ln N)` consecutive candidates, which covers
+/// `[2N, 4N)` with margin while keeping every worker below candidate `5N`. A ring family is
+/// revisited only after the serial trial-division bound below, so its lanes have completed before
+/// their next batch. The ring footprint includes a factor-four allowance for local builders,
+/// ordered merge, and recycling.
 ///
 /// Prime coverage uses Dusart's explicit 2010 bounds:
 ///
@@ -267,7 +269,10 @@ pub struct PrimeEpochPlan {
     pub gap_buffer_blocks: f64,
     pub scheduler_live_cells: f64,
     pub scheduler_fraction: f64,
+    pub candidate_capacity: f64,
     pub candidate_coverage: f64,
+    pub admitted_batches: f64,
+    pub admission_fraction: f64,
     pub maximum_gap_fraction: f64,
     pub mask_latency: f64,
     pub mask_lead_fraction: f64,
@@ -279,49 +284,54 @@ pub struct PrimeEpochPlan {
 
 impl PrimeEpochPlan {
     pub const PACKED_GAP_BITS: f64 = 20.0;
+    pub const ASYMPTOTIC_MASK_LEAD: f64 = 0.230_831_206_542_234_13;
+    pub const ASYMPTOTIC_SCHEDULER_FRACTION: f64 = 0.266_415_229_568_717_77;
+    pub const ASYMPTOTIC_BUILDER_LANE_FRACTION: f64 = 0.026_641_522_956_871_78;
+    pub const ASYMPTOTIC_NEXT_BUILD_FRACTION: f64 = 0.532_830_459_137_435_5;
+    pub const ASYMPTOTIC_RESERVE_FRACTION: f64 = 0.600_377_155_646_923_3;
 
     pub fn for_power(power: u32) -> Result<Self, String> {
-        if !(10..=512).contains(&power) {
-            return Err("epoch power must be between 10 and 512".to_string());
+        if !(10..=1021).contains(&power) {
+            return Err("epoch power must be between 10 and 1021".to_string());
         }
         let lower = 2f64.powi(power as i32);
         let ln_n = lower.ln();
-        let lanes = (4.0 * ln_n).ceil() as u64;
+        let lanes = (5.0 * ln_n).ceil() as u64;
         let word_bits = power + 4;
         let width = f64::from(word_bits);
 
         // Every trial divisor performs a bounded number of full-tape sweeps.  One hundred
         // width-squared steps per divisor is deliberately loose and covers the merge/reset tail.
-        let worker_latency = 100.0 * (2.0 * lower.sqrt() + 1.0) * (width * width + width + 1.0);
+        let worker_latency = 100.0 * ((5.0 * lower).sqrt() + 1.0) * (width * width + width + 1.0);
         let ring_families = (worker_latency + 8.0 * lanes as f64 + 4.0 * width).ceil();
         let family_blocks = lanes as f64 * (4.0 * width + 16.0);
         let ring_blocks = 4.0 * ring_families * family_blocks;
 
-        // Two variable-length gap buffers cover the current and next dyadic interval.  Concavity
-        // bounds their self-delimiting binary records from the interval length and pi(4N).
-        let four_n = 4.0 * lower;
-        let upper_records = dusart_upper_pi(four_n);
-        let average_gap = 2.0 * lower / upper_records.max(1.0);
-        let gap_bits = upper_records * ((average_gap + 1.0).log2() + 2.0);
-        let gap_buffer_blocks = 2.0 * gap_bits / Self::PACKED_GAP_BITS;
-
-        let scheduler_live_cells = 4.0 * (ring_blocks + gap_buffer_blocks);
-        let scheduler_fraction = scheduler_live_cells / lower;
         let output_generations = (dusart_lower_pi(2.0 * lower) - dusart_upper_pi(lower)).max(0.0);
-        let candidate_coverage = lanes as f64 * output_generations / (2.0 * lower);
-        let maximum_gap_fraction = 1.0 / (25.0 * ln_n * ln_n);
-        let maximum_splits = lower * maximum_gap_fraction / 4.0;
+        let candidate_capacity = lanes as f64 * output_generations / (2.0 * lower);
+        let admitted_batches = (output_generations / 2.0).ceil();
+        let candidate_coverage = lanes as f64 * admitted_batches / (2.0 * lower);
+        let admission_fraction = admitted_batches / output_generations;
+
+        // Dusart's interval theorem is applied at the largest possible current prime, 2N.
+        let maximum_gap_fraction = 2.0 / (25.0 * (2.0 * lower).ln().powi(2));
+        let maximum_splits = (lower * maximum_gap_fraction + 3.0) / 4.0;
         let mask_width = (maximum_splits + 1.0).log2().ceil() + 1.0;
         let mask_latency = (8.0 * mask_width + 2.0) * maximum_splits + 4.0 * mask_width;
         let mask_lead_fraction = mask_latency / output_generations;
-        let queue_side = gap_buffer_blocks.sqrt().ceil();
+
+        // Only the rolling lead window is buffered. Four copies cover two fixed-width
+        // prime/gap windows plus equally sized active padding used by stable column compaction.
         let packed_chunks = (width / PrimeEpochPlan::PACKED_GAP_BITS).ceil();
+        let gap_buffer_blocks = 4.0 * mask_latency * packed_chunks;
+        let scheduler_live_cells = 4.0 * (ring_blocks + gap_buffer_blocks);
+        let scheduler_fraction = scheduler_live_cells / lower;
+        let queue_side = gap_buffer_blocks.sqrt().ceil();
         let queue_row_height = packed_chunks * PrimeEpochPlan::PACKED_GAP_BITS + 1.0;
         let queue_latency = queue_side * (1.0 + queue_row_height);
         let queue_lead_fraction = queue_latency / output_generations;
         let next_scheduler_live = scheduler_live_estimate(power + 1)?;
-        let builder_blocks_per_generation =
-            ((next_scheduler_live - scheduler_live_cells) / 4.0) / output_generations;
+        let builder_blocks_per_generation = (next_scheduler_live / 4.0) / output_generations;
         let builder_lane_fraction = builder_blocks_per_generation / lanes as f64;
 
         Ok(PrimeEpochPlan {
@@ -335,7 +345,10 @@ impl PrimeEpochPlan {
             gap_buffer_blocks,
             scheduler_live_cells,
             scheduler_fraction,
+            candidate_capacity,
             candidate_coverage,
+            admitted_batches,
+            admission_fraction,
             maximum_gap_fraction,
             mask_latency,
             mask_lead_fraction,
@@ -348,15 +361,22 @@ impl PrimeEpochPlan {
 
     pub fn certified(&self) -> bool {
         self.lower >= 396_738.0
-            && self.candidate_coverage >= 1.0
+            && self.candidate_capacity >= 1.0
+            && self.candidate_coverage >= 1.0 - 1e-12
+            && self.candidate_coverage <= 1.5
+            && self.admission_fraction <= 1.0
             && self.scheduler_fraction <= 0.5
             && self.maximum_gap_fraction < 0.5
             && self.mask_lead_fraction < 0.25
             && self.queue_lead_fraction < 0.01
-            && self.builder_lane_fraction <= 0.05
+            && self.builder_lane_fraction <= 0.06
             && self
                 .next_epoch_build_fraction()
-                .map(|fraction| fraction <= 0.5)
+                .map(|fraction| fraction <= 1.0)
+                .unwrap_or(false)
+            && self
+                .next_epoch_reserve_fraction()
+                .map(|fraction| fraction >= 0.25)
                 .unwrap_or(false)
     }
 
@@ -366,7 +386,7 @@ impl PrimeEpochPlan {
                 .checked_add(1)
                 .ok_or_else(|| "next epoch power overflowed".to_string())?,
         )?;
-        Ok((next.scheduler_live_cells - self.scheduler_live_cells) / self.lower)
+        Ok(next.scheduler_live_cells / self.lower)
     }
 
     pub fn next_epoch_reserve_fraction(&self) -> Result<f64, String> {
@@ -375,11 +395,14 @@ impl PrimeEpochPlan {
                 .checked_add(1)
                 .ok_or_else(|| "next epoch power overflowed".to_string())?,
         )?;
-        Ok((2.0 * self.lower - next.scheduler_live_cells) / (2.0 * self.lower))
+        Ok(
+            (2.0 * self.lower - self.scheduler_live_cells - next.scheduler_live_cells)
+                / (2.0 * self.lower),
+        )
     }
 
     pub fn first_certified_power() -> Result<u32, String> {
-        (10..=512)
+        (10..=1020)
             .find_map(|power| {
                 Self::for_power(power)
                     .ok()
@@ -388,25 +411,34 @@ impl PrimeEpochPlan {
             })
             .ok_or_else(|| "no certified dyadic epoch fits the checked range".to_string())
     }
+
+    pub fn asymptotic_limits_certified() -> bool {
+        Self::ASYMPTOTIC_MASK_LEAD < 0.25
+            && Self::ASYMPTOTIC_SCHEDULER_FRACTION < 0.5
+            && Self::ASYMPTOTIC_BUILDER_LANE_FRACTION < 0.06
+            && Self::ASYMPTOTIC_NEXT_BUILD_FRACTION < 1.0
+            && Self::ASYMPTOTIC_RESERVE_FRACTION > 0.25
+    }
 }
 
 fn scheduler_live_estimate(power: u32) -> Result<f64, String> {
-    if !(10..=513).contains(&power) {
+    if !(10..=1022).contains(&power) {
         return Err("scheduler estimate power is outside the checked range".to_string());
     }
     let lower = 2f64.powi(power as i32);
     let logarithm = lower.ln();
-    let lanes = (4.0 * logarithm).ceil();
+    let lanes = (5.0 * logarithm).ceil();
     let width = f64::from(power + 4);
-    let worker_latency = 100.0 * (2.0 * lower.sqrt() + 1.0) * (width * width + width + 1.0);
+    let worker_latency = 100.0 * ((5.0 * lower).sqrt() + 1.0) * (width * width + width + 1.0);
     let ring_families = (worker_latency + 8.0 * lanes + 4.0 * width).ceil();
     let family_blocks = lanes * (4.0 * width + 16.0);
     let ring_blocks = 4.0 * ring_families * family_blocks;
-    let four_n = 4.0 * lower;
-    let upper_records = dusart_upper_pi(four_n);
-    let average_gap = 2.0 * lower / upper_records.max(1.0);
-    let gap_bits = upper_records * ((average_gap + 1.0).log2() + 2.0);
-    let gap_buffer_blocks = 2.0 * gap_bits / PrimeEpochPlan::PACKED_GAP_BITS;
+    let maximum_gap_fraction = 2.0 / (25.0 * (2.0 * lower).ln().powi(2));
+    let maximum_splits = (lower * maximum_gap_fraction + 3.0) / 4.0;
+    let mask_width = (maximum_splits + 1.0).log2().ceil() + 1.0;
+    let mask_latency = (8.0 * mask_width + 2.0) * maximum_splits + 4.0 * mask_width;
+    let packed_chunks = (width / PrimeEpochPlan::PACKED_GAP_BITS).ceil();
+    let gap_buffer_blocks = 4.0 * mask_latency * packed_chunks;
     Ok(4.0 * (ring_blocks + gap_buffer_blocks))
 }
 
@@ -2017,25 +2049,34 @@ mod tests {
 
     #[test]
     fn dyadic_epoch_certificate_closes_coverage_and_population_budget() {
-        assert_eq!(PrimeEpochPlan::first_certified_power().unwrap(), 86);
-        let before = PrimeEpochPlan::for_power(85).unwrap();
-        assert!(before.candidate_coverage > 1.9);
+        assert_eq!(PrimeEpochPlan::first_certified_power().unwrap(), 88);
+        let before = PrimeEpochPlan::for_power(87).unwrap();
+        assert!(before.candidate_capacity > 2.4);
         assert!(before.scheduler_fraction > 0.5);
 
-        let plan = PrimeEpochPlan::for_power(86).unwrap();
+        let plan = PrimeEpochPlan::for_power(88).unwrap();
         assert!(plan.certified());
-        assert!(plan.candidate_coverage > 1.9);
-        assert!(plan.scheduler_fraction < 0.46);
-        assert!(plan.maximum_gap_fraction < 0.00002);
-        assert!(plan.mask_lead_fraction < 0.095);
-        assert!(plan.queue_lead_fraction < 0.0000000002);
-        assert!(plan.builder_blocks_per_generation < 4.7);
-        assert!(plan.builder_lane_fraction < 0.02);
-        assert!(plan.next_epoch_build_fraction().unwrap() < 0.32);
-        assert!(plan.next_epoch_reserve_fraction().unwrap() > 0.61);
-        assert_eq!(plan.lanes, 239);
-        assert_eq!(plan.word_bits, 90);
-        assert!(plan.ring_blocks > plan.gap_buffer_blocks);
+        assert!(plan.candidate_capacity > 2.4);
+        assert!(plan.candidate_coverage > 1.23);
+        assert!(plan.admission_fraction <= 0.5 + 1e-12);
+        assert!(plan.scheduler_fraction < 0.45);
+        assert!(plan.maximum_gap_fraction < 0.000022);
+        assert!(plan.mask_lead_fraction < 0.188);
+        assert!(plan.queue_lead_fraction < 0.0000000001);
+        assert!(plan.builder_blocks_per_generation < 12.1);
+        assert!(plan.builder_lane_fraction < 0.04);
+        assert!(plan.next_epoch_build_fraction().unwrap() < 0.79);
+        assert!(plan.next_epoch_reserve_fraction().unwrap() > 0.38);
+        assert_eq!(plan.lanes, 305);
+        assert_eq!(plan.word_bits, 92);
+        assert!(plan.gap_buffer_blocks > plan.ring_blocks);
+        assert!(PrimeEpochPlan::asymptotic_limits_certified());
+        let failed = (88..=1020).find(|power| {
+            PrimeEpochPlan::for_power(*power)
+                .map(|plan| !plan.certified())
+                .unwrap_or(true)
+        });
+        assert_eq!(failed, None);
     }
 
     #[test]
