@@ -271,6 +271,8 @@ pub struct PrimeEpochPlan {
     pub maximum_gap_fraction: f64,
     pub mask_latency: f64,
     pub mask_lead_fraction: f64,
+    pub queue_latency: f64,
+    pub queue_lead_fraction: f64,
 }
 
 impl PrimeEpochPlan {
@@ -310,6 +312,11 @@ impl PrimeEpochPlan {
         let mask_width = (maximum_splits + 1.0).log2().ceil() + 1.0;
         let mask_latency = (8.0 * mask_width + 2.0) * maximum_splits + 4.0 * mask_width;
         let mask_lead_fraction = mask_latency / output_generations;
+        let queue_side = gap_buffer_blocks.sqrt().ceil();
+        let packed_chunks = (width / PrimeEpochPlan::PACKED_GAP_BITS).ceil();
+        let queue_row_height = packed_chunks * PrimeEpochPlan::PACKED_GAP_BITS + 1.0;
+        let queue_latency = queue_side * (1.0 + queue_row_height);
+        let queue_lead_fraction = queue_latency / output_generations;
 
         Ok(PrimeEpochPlan {
             power,
@@ -326,6 +333,8 @@ impl PrimeEpochPlan {
             maximum_gap_fraction,
             mask_latency,
             mask_lead_fraction,
+            queue_latency,
+            queue_lead_fraction,
         })
     }
 
@@ -335,6 +344,7 @@ impl PrimeEpochPlan {
             && self.scheduler_fraction <= 0.5
             && self.maximum_gap_fraction < 0.5
             && self.mask_lead_fraction < 0.25
+            && self.queue_lead_fraction < 0.01
             && self
                 .next_epoch_build_fraction()
                 .map(|fraction| fraction <= 0.5)
@@ -1989,6 +1999,7 @@ mod tests {
         assert!(plan.scheduler_fraction < 0.46);
         assert!(plan.maximum_gap_fraction < 0.00002);
         assert!(plan.mask_lead_fraction < 0.095);
+        assert!(plan.queue_lead_fraction < 0.0000000002);
         assert!(plan.next_epoch_build_fraction().unwrap() < 0.32);
         assert!(plan.next_epoch_reserve_fraction().unwrap() > 0.61);
         assert_eq!(plan.lanes, 239);

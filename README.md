@@ -351,6 +351,18 @@ synchronizes the selected prefix. A permanent non-splitting sentinel
 applies the tail residue in the same generation, including the zero-split case. Direct block-code
 tests verify a one-generation binary change of exactly \(4k+\Delta r\).
 
+`src/packed_queue.rs` supplies the preceding buffer stage. A logical cell packs up to 20 record
+bits while retaining the same four-live-cell binary frame. Entire fixed-height record columns move
+through active padding, so every row compacts stably without changing population. After compaction,
+a shift phase exposes one complete multi-chunk record at the row edge per generation. Rows cover
+consecutive candidate ranges and are consumed in row order; their square-grid compaction and row
+switch overhead is included in `PrimeEpochPlan`.
+
+The queue and decoder use the same chunk vector directly: no host integer reconstruction is needed
+between them. `src/conveyor.rs` provides population-neutral cyclic transport for the epoch layout;
+payload order is preserved around a finite local rectangle, and parallel copies carry every chunk
+of a record column.
+
 The older launch estimate is still useful for the compact one-shot mesh alternative:
 
 \[
@@ -377,8 +389,8 @@ until those tables and the induction are present.
 The remaining local construction is narrower than before but still essential:
 
 - build and recycle the dyadic ring geometry from ordinary reservoir blocks;
-- compact each ordered batch's prime values into a variable-length gap queue;
-- connect that queue to a double-buffered split/tail mask;
+- write completed family segments into their preassigned packed queue slots;
+- route compacted rows into one-shot split/tail decoders at the certified lead;
 - prove arena ownership and reserved child vacancies at every output transition;
 - compile the finite bootstrap to the complete legal epoch configuration.
 

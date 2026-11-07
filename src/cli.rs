@@ -926,6 +926,8 @@ fn run_epoch(opts: &Options) -> Result<(), String> {
     println!("  max gap / N          : {:.8}", plan.maximum_gap_fraction);
     println!("  mask latency bound   : {:.3e}", plan.mask_latency);
     println!("  mask lead / epoch    : {:.6}", plan.mask_lead_fraction);
+    println!("  queue latency bound  : {:.3e}", plan.queue_latency);
+    println!("  queue lead / epoch   : {:.12}", plan.queue_lead_fraction);
     println!(
         "  next-ring births / N : {:.6}",
         plan.next_epoch_build_fraction()?
@@ -939,8 +941,8 @@ fn run_epoch(opts: &Options) -> Result<(), String> {
         "  first certified K    : {}",
         PrimeEpochPlan::first_certified_power()?
     );
-    println!("certificate covers throughput, mass, and local mask latency;");
-    println!("ordered gap-queue transport and epoch construction remain.");
+    println!("certificate covers throughput, mass, mask decoding, and packed queue timing;");
+    println!("family-to-slot insertion and epoch construction remain.");
     Ok(())
 }
 
