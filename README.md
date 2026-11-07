@@ -335,7 +335,8 @@ is \(N=2^{86}\):
 - next-epoch ordinary/output reserve above \(0.617N\);
 - explicit maximum prime gap below \(0.00001126N\);
 - worst-case local gap-to-mask decoding below \(0.095\) of one epoch;
-- next-ring construction rate below 4.7 ordinary blocks per generation (eight heads suffice).
+- next-ring construction rate below 4.7 ordinary blocks per generation at the first certified
+  epoch, under 2% of its 239 lane/build heads.
 
 The last number uses Dusart's theorem that
 \([x,x+x/(25\ln^2x)]\) contains a prime for \(x\ge396738\). Thus the asymptotic schedule has both
@@ -343,6 +344,10 @@ enough candidate throughput and enough ordinary-block reserve for every required
 threshold is acceptable for an existence construction because everything below it can be a
 finite bootstrap; it is not intended as a practical simulation threshold. Run
 `epoch --power 86` to print the certificate.
+
+The builder count is not claimed to stay fixed: with fixed 20-bit packed states it grows only as
+\(O(\log\log N)\), while the epoch supplies \(\Theta(\log N)\) lane/build heads. The certificate
+therefore checks the builder share of the available heads, not a false constant-eight bound.
 
 `src/mask_writer.rs` implements that local decoder rather than treating it as a timing oracle. A
 sparse \(O(\log g)\)-cell counter loads a binary split count, decrements it, shifts one cell and

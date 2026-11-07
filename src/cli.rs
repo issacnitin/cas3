@@ -932,6 +932,7 @@ fn run_epoch(opts: &Options) -> Result<(), String> {
         "  builder blocks / gen : {:.6}",
         plan.builder_blocks_per_generation
     );
+    println!("  builder / lane share : {:.6}", plan.builder_lane_fraction);
     println!(
         "  next-ring births / N : {:.6}",
         plan.next_epoch_build_fraction()?

@@ -274,6 +274,7 @@ pub struct PrimeEpochPlan {
     pub queue_latency: f64,
     pub queue_lead_fraction: f64,
     pub builder_blocks_per_generation: f64,
+    pub builder_lane_fraction: f64,
 }
 
 impl PrimeEpochPlan {
@@ -321,6 +322,7 @@ impl PrimeEpochPlan {
         let next_scheduler_live = scheduler_live_estimate(power + 1)?;
         let builder_blocks_per_generation =
             ((next_scheduler_live - scheduler_live_cells) / 4.0) / output_generations;
+        let builder_lane_fraction = builder_blocks_per_generation / lanes as f64;
 
         Ok(PrimeEpochPlan {
             power,
@@ -340,6 +342,7 @@ impl PrimeEpochPlan {
             queue_latency,
             queue_lead_fraction,
             builder_blocks_per_generation,
+            builder_lane_fraction,
         })
     }
 
@@ -350,7 +353,7 @@ impl PrimeEpochPlan {
             && self.maximum_gap_fraction < 0.5
             && self.mask_lead_fraction < 0.25
             && self.queue_lead_fraction < 0.01
-            && self.builder_blocks_per_generation <= 8.0
+            && self.builder_lane_fraction <= 0.05
             && self
                 .next_epoch_build_fraction()
                 .map(|fraction| fraction <= 0.5)
@@ -2027,6 +2030,7 @@ mod tests {
         assert!(plan.mask_lead_fraction < 0.095);
         assert!(plan.queue_lead_fraction < 0.0000000002);
         assert!(plan.builder_blocks_per_generation < 4.7);
+        assert!(plan.builder_lane_fraction < 0.02);
         assert!(plan.next_epoch_build_fraction().unwrap() < 0.32);
         assert!(plan.next_epoch_reserve_fraction().unwrap() > 0.61);
         assert_eq!(plan.lanes, 239);
