@@ -1,11 +1,13 @@
 use crate::construct::{LocalRule, LogicalConfig};
 use crate::prime_worker::{
-    worker_candidate_bit, worker_is_msb, worker_rule_state_count, PrimeWorker,
+    candidate_result_code, recycle_candidate_result, worker_candidate_bit, worker_candidate_value,
+    worker_is_msb, worker_rule_state_count, PrimeWorker, RollingPrimeWorkerRule,
 };
 
 const SOUTH: usize = 1;
 const WEST: usize = 3;
 const EAST: usize = 4;
+const NORTH: usize = 6;
 
 const RECORD_PAD: usize = 1;
 const RECORD_ZERO: usize = 2;
@@ -16,7 +18,8 @@ const RECORD_RETURN_ONE: usize = 6;
 const RECORD_DONE_ZERO: usize = 7;
 const RECORD_DONE_ONE: usize = 8;
 const RECORD_DONE_EMPTY: usize = 9;
-const RECORD_STATE_COUNT: usize = 10;
+const RECORD_RESET: usize = 10;
+const RECORD_STATE_COUNT: usize = 11;
 
 pub struct CandidateRecordRule;
 
@@ -85,7 +88,9 @@ impl LocalRule for CandidateRecordRule {
         };
         let next = match record {
             RECORD_PAD => {
-                if Self::decode(neighbours[WEST]) == Some(RECORD_WAVE)
+                if Self::decode(neighbours[WEST]) == Some(RECORD_RESET) {
+                    RECORD_RESET
+                } else if Self::decode(neighbours[WEST]) == Some(RECORD_WAVE)
                     && worker_candidate_bit(neighbours[SOUTH]).is_some()
                 {
                     RECORD_WAVE
@@ -102,7 +107,9 @@ impl LocalRule for CandidateRecordRule {
                 }
             }
             RECORD_ZERO | RECORD_ONE => {
-                if Self::decode(neighbours[EAST])
+                if Self::decode(neighbours[WEST]) == Some(RECORD_RESET) {
+                    RECORD_RESET
+                } else if Self::decode(neighbours[EAST])
                     .map(Self::is_returning)
                     .unwrap_or(false)
                 {
@@ -121,9 +128,77 @@ impl LocalRule for CandidateRecordRule {
                 }
             }
             RECORD_DONE_ZERO | RECORD_DONE_ONE | RECORD_DONE_EMPTY => record,
+            RECORD_RESET => RECORD_PAD,
             _ => RECORD_DONE_EMPTY,
         };
         Self::encode(next)
+    }
+}
+
+pub struct RollingRecordedWorkerRule;
+
+impl LocalRule for RollingRecordedWorkerRule {
+    fn state_count(&self) -> usize {
+        CandidateRecordRule.state_count()
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        if center == 0 {
+            if worker_candidate_bit(neighbours[SOUTH]).is_some()
+                && CandidateRecordRule::decode(neighbours[WEST]).is_some()
+            {
+                return CandidateRecordRule::encode(RECORD_PAD);
+            }
+            let worker_states = worker_rule_state_count();
+            let mut local = [0; 8];
+            for slot in 0..8 {
+                if neighbours[slot] <= worker_states {
+                    local[slot] = neighbours[slot];
+                }
+            }
+            return RollingPrimeWorkerRule.next(0, local);
+        }
+        if let Some(record) = CandidateRecordRule::decode(center) {
+            let result = candidate_result_code(neighbours[SOUTH]);
+            if record == RECORD_PAD && CandidateRecordRule::decode(neighbours[WEST]).is_none() {
+                return match result {
+                    Some(false) => CandidateRecordRule::encode(RECORD_WAVE),
+                    Some(true) => CandidateRecordRule::encode(RECORD_DONE_EMPTY),
+                    None => CandidateRecordRule.next(center, neighbours),
+                };
+            }
+            if matches!(
+                record,
+                RECORD_DONE_ZERO | RECORD_DONE_ONE | RECORD_DONE_EMPTY
+            ) && result.is_some()
+            {
+                return CandidateRecordRule::encode(RECORD_RESET);
+            }
+            return CandidateRecordRule.next(center, neighbours);
+        }
+        if let Some(composite) = candidate_result_code(center) {
+            let record = CandidateRecordRule::decode(neighbours[NORTH]);
+            let acknowledged = if composite {
+                record == Some(RECORD_DONE_EMPTY)
+            } else {
+                matches!(record, Some(RECORD_DONE_ZERO | RECORD_DONE_ONE))
+            };
+            return if acknowledged {
+                recycle_candidate_result(center).unwrap()
+            } else {
+                center
+            };
+        }
+
+        let worker_states = worker_rule_state_count();
+        let center = if center <= worker_states { center } else { 0 };
+        let mut local = [0; 8];
+        for slot in 0..8 {
+            if neighbours[slot] <= worker_states {
+                local[slot] = neighbours[slot];
+            }
+        }
+        RollingPrimeWorkerRule.next(center, local)
     }
 }
 
@@ -131,6 +206,12 @@ pub struct CandidateRecordWriter {
     pub config: LogicalConfig,
     pub steps: usize,
     width: usize,
+}
+
+pub struct RollingRecordedWorker {
+    pub config: LogicalConfig,
+    pub steps: usize,
+    pub records: Vec<(usize, Option<usize>)>,
 }
 
 pub struct PackedCandidateRecordRule {
@@ -338,6 +419,83 @@ impl CandidateRecordWriter {
     }
 }
 
+impl RollingRecordedWorker {
+    pub fn new(candidate: usize) -> Result<Self, String> {
+        let worker = PrimeWorker::new(candidate)?;
+        let width = worker.config.len();
+        let mut config = worker.config;
+        for x in 0..width {
+            config.insert((x as i32, 1), CandidateRecordRule::encode(RECORD_PAD));
+        }
+        Ok(RollingRecordedWorker {
+            config,
+            steps: 0,
+            records: Vec::new(),
+        })
+    }
+
+    fn settled_record(&self) -> Result<Option<Option<usize>>, String> {
+        let Some(record) = self
+            .config
+            .get(&(0, 1))
+            .and_then(|state| CandidateRecordRule::decode(*state))
+        else {
+            return Ok(None);
+        };
+        if record == RECORD_DONE_EMPTY {
+            return Ok(Some(None));
+        }
+        if !matches!(record, RECORD_DONE_ZERO | RECORD_DONE_ONE) {
+            return Ok(None);
+        }
+        let mut value = 0usize;
+        for ((x, y), state) in &self.config {
+            if *y != 1 || *x < 0 || *x >= usize::BITS as i32 {
+                continue;
+            }
+            let record = CandidateRecordRule::decode(*state)
+                .ok_or_else(|| "rolling record contains an invalid state".to_string())?;
+            let bit = CandidateRecordRule::bit(record)
+                .ok_or_else(|| "rolling prime record is not settled".to_string())?;
+            value |= (bit as usize) << *x;
+        }
+        Ok(Some(Some(value)))
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        if let Some(record) = self.settled_record()? {
+            let candidate = worker_candidate_value(&self.config)
+                .ok_or_else(|| "rolling record worker lost its candidate".to_string())?;
+            self.records.push((candidate, record));
+        }
+        self.config = RollingRecordedWorkerRule.step(&self.config)?;
+        self.steps += 1;
+        Ok(())
+    }
+
+    pub fn run_until_records(&mut self, count: usize, max_steps: usize) -> Result<(), String> {
+        while self.records.len() < count && self.steps < max_steps {
+            self.step()?;
+        }
+        if self.records.len() != count {
+            return Err(format!(
+                "rolling record worker emitted {} of {} records in {} steps; candidate {:?}, result {:?}, record {:?}",
+                self.records.len(),
+                count,
+                max_steps,
+                worker_candidate_value(&self.config),
+                self.config
+                    .get(&(0, 0))
+                    .and_then(|state| candidate_result_code(*state)),
+                self.config
+                    .get(&(0, 1))
+                    .and_then(|state| CandidateRecordRule::decode(*state))
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PackedCandidateRecordWriter {
     pub fn new(candidate: usize, prime: bool, payload_bits: usize) -> Result<Self, String> {
         let rule = PackedCandidateRecordRule::new(payload_bits)?;
@@ -496,5 +654,40 @@ mod tests {
         assert!(machine.codec.width > 20_000_000);
         let binary = machine.codec.encode(&writer.config).unwrap();
         assert_eq!(machine.codec.decode(&binary).unwrap(), writer.config);
+    }
+
+    #[test]
+    fn rolling_worker_classifies_copies_and_recycles_under_one_rule() {
+        let start = 15usize;
+        let count = 26usize;
+        let mut worker = RollingRecordedWorker::new(start).unwrap();
+        worker.run_until_records(count, 2_000_000).unwrap();
+        assert_eq!(
+            worker
+                .records
+                .iter()
+                .map(|record| record.0)
+                .collect::<Vec<_>>(),
+            (start..start + count).collect::<Vec<_>>()
+        );
+        for &(candidate, record) in &worker.records {
+            assert_eq!(record, is_prime(candidate).then_some(candidate));
+        }
+        let worker_width = worker.config.keys().filter(|(_, y)| *y == 0).count();
+        let record_width = worker.config.keys().filter(|(_, y)| *y == 1).count();
+        assert_eq!(worker_width, record_width);
+    }
+
+    #[test]
+    fn rolling_record_product_compiles_to_binary_blocks() {
+        let worker = RollingRecordedWorker::new(29).unwrap();
+        let machine = BlockMachine::new(RollingRecordedWorkerRule).unwrap();
+        let binary = machine.codec.encode(&worker.config).unwrap();
+        let next = machine.step_binary(&binary).unwrap();
+        assert_eq!(
+            machine.codec.decode(&next).unwrap(),
+            machine.rule.step(&worker.config).unwrap()
+        );
+        assert_eq!(binary.len(), next.len());
     }
 }

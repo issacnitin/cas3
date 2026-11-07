@@ -366,7 +366,9 @@ of a record column.
 
 `src/record_writer.rs` supplies the family-side format conversion. A prime result freezes its
 distributed candidate tape, copies the bits into an active record row, and packs fixed groups of
-bits into queue chunks with local moving heads; a composite leaves a padding hole. `src/gap_plan.rs`
+bits into queue chunks with local moving heads; a composite leaves a padding hole. The recurrent
+product rule performs classification, copy/backpressure, record reset, guard-bit growth and worker
+recycle without a host transition between candidates. `src/gap_plan.rs`
 then implements the exact weight-four arithmetic after consecutive prime records are subtracted:
 adding the current two-bit tail residue makes the low two sum bits the next residue and all higher
 bits the split count. The synchronized typed-output variant can assign every split child a concrete
