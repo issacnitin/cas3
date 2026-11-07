@@ -272,15 +272,75 @@ framed block compiler.  Tests show the exact prime-prefix bootstrap and a handof
 weight-seven framed tail state.  A later scheduler must still satisfy the tail/allocator
 invariants at that handoff point; the bootstrap does not manufacture scheduler correctness.
 
-These local components still need a physical stream wiring and reset/recycle protocol.  The
-current product rule proves one candidate-to-FIFO handoff, not arbitrary many candidate tiles,
-dynamic tile placement, a double-buffered gap record, or the population-neutral one-seed
-bootstrap.
+The recurrent path no longer needs host reinitialisation. `RollingPrimeSchedulerRule` moves a
+serial worker's result back to a fixed LSB port, waits for an acknowledgement, increments the
+distributed candidate (including a new guard bit at powers of two), resets divisor, square and
+remainder fields locally, and starts the next classification. The same product rule feeds release
+pulses into a binary counter; a prime pulse snapshots the completed gap into a second row and
+resets the counter as the snapshot wave passes.
+
+`RollingStrideSchedulerRule` stores a lane stride on a parallel finite-state tape. A family of
+lanes therefore classifies
+
+\[
+n+i,\quad n+i+L,\quad n+i+2L,\ldots
+\]
+
+without changing the local alphabet or rebuilding a worker. `RollingBatchSchedulerRule` adds a
+backpressured merge column: a readiness wave waits for every lane, and a single release wave emits
+lane 0, lane 1, ... in candidate order. The `rolling` command exercises repeated batches under
+that one rule. Rust observes the released records for the diagnostic, but does not classify,
+advance, resize, reset or order them.
+
+The large worker alphabet also compiles through the framed binary codec. Decoding was changed
+from an alphabet-wide scan to direct codeword recognition, and the arbitrary 100,000-state guard
+was replaced by checked coordinate/radius arithmetic. A scheduler configuration with more than
+half a million logical states now round-trips through the constant-weight binary encoding.
 
 ### Scheduler design and remaining obstruction
 
-A viable schedule is to launch one binary trial-division worker for integer \(n\) near physical
-time
+A viable schedule uses dyadic candidate epochs. During the output interval whose prime values lie
+in \([N,2N]\), admit one batch per generation, with
+
+\[
+L=\lceil 4\ln N\rceil
+\]
+
+consecutive candidates per batch. A ring has enough phase-staggered recurrent families that a
+family is revisited only after the conservative serial-worker bound
+
+\[
+100(2\sqrt N+1)(w^2+w+1), \qquad w=\lceil\log_2(4N)\rceil+2.
+\]
+
+The next use of the family advances every lane by the whole ring stride, so the batches still
+partition the candidate interval.
+
+`PrimeEpochPlan` checks this schedule against explicit prime-counting bounds from
+[Dusart (2010)](https://arxiv.org/abs/1002.0442):
+
+\[
+\pi(x)\ge {x\over\ln x}\left(1+{1\over\ln x}\right),\qquad
+\pi(x)\le {x\over\ln x}\left(1+{1.2762\over\ln x}\right).
+\]
+
+It includes a factor-four allowance for builders, merge and recycling, plus two packed,
+self-delimiting gap buffers. The first conservative dyadic epoch passing every implemented check
+is \(N=2^{86}\):
+
+- 239 candidates per admitted batch;
+- candidate coverage \(1.981394\) times the complete next dyadic interval;
+- scheduler live population \(0.453856N\);
+- explicit maximum prime gap below \(0.00001126N\).
+
+The last number uses Dusart's theorem that
+\([x,x+x/(25\ln^2x)]\) contains a prime for \(x\ge396738\). Thus the asymptotic schedule has both
+enough candidate throughput and enough ordinary-block reserve for every required split. The huge
+threshold is acceptable for an existence construction because everything below it can be a
+finite bootstrap; it is not intended as a practical simulation threshold. Run
+`epoch --power 86` to print the certificate.
+
+The older launch estimate is still useful for the compact one-shot mesh alternative:
 
 \[
 L(n)=\left\lfloor\frac{n}{8(1+\log_2 n)}\right\rfloor.
@@ -303,12 +363,20 @@ tables, a proof that the result buffer is nonempty at every output step, and a f
 checked through the hand-off.  No claim that the population-generating rule exists is complete
 until those tables and the induction are present.
 
+The remaining local construction is narrower than before but still essential:
+
+- build and recycle the dyadic ring geometry from ordinary reservoir blocks;
+- compact each ordered batch's prime values into a variable-length gap queue;
+- connect that queue to a double-buffered split/tail mask;
+- prove arena ownership and reserved child vacancies at every output transition;
+- compile the finite bootstrap to the complete legal epoch configuration.
+
 ## Current status
 
 The original expression search still only gets as far as the 2nd dimension if you run it long
 enough.  The rule-table search answers the prefix question exactly for much larger classes than
 that: in every class tried, short prefixes of the primes can be matched but no compact rule was
-found, and the minimum description length of the prime prefixes keeps growing.  The constructive
-answer is now reduced to one open component: a real-time, finite-local prime scheduler that can
-feed the proven split/tail protocol.  The whole population question remains open until that
-component and its all-\(t\) induction are complete.
+found, and the minimum description length of the prime prefixes keeps growing. The constructive
+answer now has recurrent arithmetic, ordered batches, explicit throughput/population bounds and a
+binary compiler. The whole population question remains open until the local epoch factory,
+gap-to-mask transport, arena invariant and all-\(t\) handoff induction are complete.

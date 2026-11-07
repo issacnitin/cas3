@@ -10,7 +10,9 @@
 
 use crate::construct::{LocalRule, LogicalConfig};
 use crate::prime_worker::{
-    candidate_result_code, worker_rule_state_count, MeshCandidate, PrimeWorkerRule,
+    candidate_result_code, recycle_candidate_result, recycle_candidate_result_with_stride,
+    worker_candidate_value, worker_candidate_value_at, worker_rule_state_count,
+    worker_with_stride_bit, MeshCandidate, PrimeWorker, PrimeWorkerRule, RollingPrimeWorkerRule,
 };
 
 pub const SLOT_PENDING: usize = 1;
@@ -35,6 +37,117 @@ pub const SUB_BASE: usize = TRAVEL_BASE + TRAVEL_STATE_COUNT;
 pub const SUB_PHASES: usize = 4;
 pub const SUB_PAYLOAD: usize = 1 << 5;
 pub const SUB_STATE_COUNT: usize = 1 + SUB_PHASES * SUB_PAYLOAD;
+
+pub const PORT_IDLE: usize = 1;
+pub const PORT_READY_PRIME: usize = 2;
+pub const PORT_READY_COMPOSITE: usize = 3;
+pub const PORT_RELEASE_PRIME: usize = 4;
+pub const PORT_RELEASE_COMPOSITE: usize = 5;
+pub const ROLLING_PORT_STATE_COUNT: usize = 6;
+pub const STRIDE_ZERO: usize = 1;
+pub const STRIDE_ONE: usize = 2;
+pub const STRIDE_STATE_COUNT: usize = 3;
+const MERGE_ROLE_COUNT: usize = 4;
+const MERGE_PHASE_COUNT: usize = 4;
+const MERGE_STATE_COUNT: usize = 1 + MERGE_ROLE_COUNT * MERGE_PHASE_COUNT;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MergeRole {
+    Top,
+    Wire,
+    Gate,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MergePhase {
+    Idle,
+    CheckDown,
+    WaitReturn,
+    ReleaseUp,
+}
+
+#[derive(Clone, Copy)]
+struct MergeCell {
+    role: MergeRole,
+    phase: MergePhase,
+}
+
+impl MergeCell {
+    fn encode(self) -> usize {
+        let role = match self.role {
+            MergeRole::Top => 0,
+            MergeRole::Wire => 1,
+            MergeRole::Gate => 2,
+            MergeRole::Bottom => 3,
+        };
+        let phase = match self.phase {
+            MergePhase::Idle => 0,
+            MergePhase::CheckDown => 1,
+            MergePhase::WaitReturn => 2,
+            MergePhase::ReleaseUp => 3,
+        };
+        1 + phase * MERGE_ROLE_COUNT + role
+    }
+
+    fn decode(state: usize) -> Option<Self> {
+        if state == 0 || state >= MERGE_STATE_COUNT {
+            return None;
+        }
+        let raw = state - 1;
+        let role = match raw % MERGE_ROLE_COUNT {
+            0 => MergeRole::Top,
+            1 => MergeRole::Wire,
+            2 => MergeRole::Gate,
+            3 => MergeRole::Bottom,
+            _ => unreachable!(),
+        };
+        let phase = match raw / MERGE_ROLE_COUNT {
+            0 => MergePhase::Idle,
+            1 => MergePhase::CheckDown,
+            2 => MergePhase::WaitReturn,
+            3 => MergePhase::ReleaseUp,
+            _ => return None,
+        };
+        Some(MergeCell { role, phase })
+    }
+}
+const ROLLING_GAP_PAYLOAD: usize = 1 << 4;
+const ROLLING_GAP_BASE: usize = 1;
+const ROLLING_GAP_LIMIT: usize = ROLLING_GAP_BASE + ROLLING_GAP_PAYLOAD;
+const ROLLING_RECORD_BASE: usize = ROLLING_GAP_LIMIT;
+const ROLLING_RECORD_STATE_COUNT: usize = 2;
+
+fn encode_rolling_gap_bit(lsb: bool, bit: bool, pulse: bool, snapshot: bool) -> usize {
+    ROLLING_GAP_BASE
+        + (lsb as usize)
+        + 2 * (bit as usize)
+        + 4 * (pulse as usize)
+        + 8 * (snapshot as usize)
+}
+
+fn decode_rolling_gap_bit(state: usize) -> Option<(bool, bool, bool, bool)> {
+    if !(ROLLING_GAP_BASE..ROLLING_GAP_LIMIT).contains(&state) {
+        return None;
+    }
+    let payload = state - ROLLING_GAP_BASE;
+    Some((
+        payload & 1 != 0,
+        payload & 2 != 0,
+        payload & 4 != 0,
+        payload & 8 != 0,
+    ))
+}
+
+fn encode_record_bit(bit: bool) -> usize {
+    ROLLING_RECORD_BASE + bit as usize
+}
+
+fn decode_record_bit(state: usize) -> Option<bool> {
+    (ROLLING_RECORD_BASE..ROLLING_RECORD_BASE + ROLLING_RECORD_STATE_COUNT)
+        .contains(&state)
+        .then_some(state != ROLLING_RECORD_BASE)
+}
 
 fn encode_gap_bit(lsb: bool, bit: bool, pulse: bool) -> usize {
     GAP_BASE + (lsb as usize) + 2 * (bit as usize) + 4 * (pulse as usize)
@@ -115,6 +228,116 @@ pub enum FifoResult {
     Composite,
 }
 
+/// Conservative all-epoch resource certificate for the recurrent batch architecture.
+///
+/// During the prime interval `[N, 2N]`, one batch is admitted per output generation.  Each batch
+/// has `ceil(4 ln N)` consecutive candidates.  A ring family is revisited only after the serial
+/// trial-division bound below, so its lanes have completed before their next batch.  The ring
+/// footprint includes a factor-four allowance for local builders, ordered merge, and recycling.
+///
+/// Prime coverage uses Dusart's explicit 2010 bounds:
+///
+///   pi(x) >= x/ln(x) * (1 + 1/ln(x))        for x >= 599
+///   pi(x) <= x/ln(x) * (1 + 1.2762/ln(x))   for x > 1
+///
+/// The split reserve uses the same paper's prime-in-short-interval theorem:
+///
+///   [x, x + x/(25 ln^2 x)] contains a prime for x >= 396738.
+#[derive(Clone, Debug)]
+pub struct PrimeEpochPlan {
+    pub power: u32,
+    pub lower: f64,
+    pub lanes: u64,
+    pub word_bits: u32,
+    pub worker_latency: f64,
+    pub ring_families: f64,
+    pub ring_blocks: f64,
+    pub gap_buffer_blocks: f64,
+    pub scheduler_live_cells: f64,
+    pub scheduler_fraction: f64,
+    pub candidate_coverage: f64,
+    pub maximum_gap_fraction: f64,
+}
+
+impl PrimeEpochPlan {
+    pub const PACKED_GAP_BITS: f64 = 20.0;
+
+    pub fn for_power(power: u32) -> Result<Self, String> {
+        if !(10..=512).contains(&power) {
+            return Err("epoch power must be between 10 and 512".to_string());
+        }
+        let lower = 2f64.powi(power as i32);
+        let ln_n = lower.ln();
+        let lanes = (4.0 * ln_n).ceil() as u64;
+        let word_bits = power + 4;
+        let width = f64::from(word_bits);
+
+        // Every trial divisor performs a bounded number of full-tape sweeps.  One hundred
+        // width-squared steps per divisor is deliberately loose and covers the merge/reset tail.
+        let worker_latency = 100.0 * (2.0 * lower.sqrt() + 1.0) * (width * width + width + 1.0);
+        let ring_families = (worker_latency + 8.0 * lanes as f64 + 4.0 * width).ceil();
+        let family_blocks = lanes as f64 * (4.0 * width + 16.0);
+        let ring_blocks = 4.0 * ring_families * family_blocks;
+
+        // Two variable-length gap buffers cover the current and next dyadic interval.  Concavity
+        // bounds their self-delimiting binary records from the interval length and pi(4N).
+        let four_n = 4.0 * lower;
+        let upper_records = dusart_upper_pi(four_n);
+        let average_gap = 2.0 * lower / upper_records.max(1.0);
+        let gap_bits = upper_records * ((average_gap + 1.0).log2() + 2.0);
+        let gap_buffer_blocks = 2.0 * gap_bits / Self::PACKED_GAP_BITS;
+
+        let scheduler_live_cells = 4.0 * (ring_blocks + gap_buffer_blocks);
+        let scheduler_fraction = scheduler_live_cells / lower;
+        let output_generations = (dusart_lower_pi(2.0 * lower) - dusart_upper_pi(lower)).max(0.0);
+        let candidate_coverage = lanes as f64 * output_generations / (2.0 * lower);
+        let maximum_gap_fraction = 1.0 / (25.0 * ln_n * ln_n);
+
+        Ok(PrimeEpochPlan {
+            power,
+            lower,
+            lanes,
+            word_bits,
+            worker_latency,
+            ring_families,
+            ring_blocks,
+            gap_buffer_blocks,
+            scheduler_live_cells,
+            scheduler_fraction,
+            candidate_coverage,
+            maximum_gap_fraction,
+        })
+    }
+
+    pub fn certified(&self) -> bool {
+        self.lower >= 396_738.0
+            && self.candidate_coverage >= 1.0
+            && self.scheduler_fraction <= 0.5
+            && self.maximum_gap_fraction < 0.5
+    }
+
+    pub fn first_certified_power() -> Result<u32, String> {
+        (10..=512)
+            .find_map(|power| {
+                Self::for_power(power)
+                    .ok()
+                    .filter(PrimeEpochPlan::certified)
+                    .map(|_| power)
+            })
+            .ok_or_else(|| "no certified dyadic epoch fits the checked range".to_string())
+    }
+}
+
+fn dusart_lower_pi(x: f64) -> f64 {
+    let logarithm = x.ln();
+    x / logarithm * (1.0 + 1.0 / logarithm)
+}
+
+fn dusart_upper_pi(x: f64) -> f64 {
+    let logarithm = x.ln();
+    x / logarithm * (1.0 + 1.2762 / logarithm)
+}
+
 pub struct OrderedFifoRule;
 
 fn is_slot(state: usize) -> bool {
@@ -181,6 +404,409 @@ pub struct IntegratedCandidate {
     pub steps: usize,
     gap_origin: (i32, i32),
     gap_width: usize,
+}
+
+/// Recurrent result port for one serial worker.
+///
+/// Unlike `OrderedFifo`, this port has no consumed terminal state.  Once a result is released it
+/// returns to idle, and the worker starts its local increment/reset sweep on the acknowledgement
+/// edge.  Results always return to the fixed LSB, so tape-width growth does not need a host-side
+/// rebuild or a moving output port.
+pub struct RollingPrimeSchedulerRule;
+
+impl RollingPrimeSchedulerRule {
+    fn encode_port(state: usize) -> usize {
+        worker_rule_state_count() + state
+    }
+
+    fn decode_port(state: usize) -> Option<usize> {
+        let offset = worker_rule_state_count();
+        (state > offset && state < offset + ROLLING_PORT_STATE_COUNT).then(|| state - offset)
+    }
+
+    fn port_at_idle(state: usize) -> bool {
+        Self::decode_port(state) == Some(PORT_IDLE)
+    }
+
+    fn gap_offset() -> usize {
+        worker_rule_state_count() + ROLLING_PORT_STATE_COUNT
+    }
+
+    fn encode_gap(state: usize) -> usize {
+        Self::gap_offset() + state
+    }
+
+    fn decode_gap(state: usize) -> Option<usize> {
+        let offset = Self::gap_offset();
+        let raw = state.checked_sub(offset)?;
+        (ROLLING_GAP_BASE..ROLLING_GAP_LIMIT)
+            .contains(&raw)
+            .then_some(raw)
+    }
+
+    fn encode_record(state: usize) -> usize {
+        Self::gap_offset() + state
+    }
+
+    fn decode_record(state: usize) -> Option<usize> {
+        let offset = Self::gap_offset();
+        let raw = state.checked_sub(offset)?;
+        (ROLLING_RECORD_BASE..ROLLING_RECORD_BASE + ROLLING_RECORD_STATE_COUNT)
+            .contains(&raw)
+            .then_some(raw)
+    }
+}
+
+impl LocalRule for RollingPrimeSchedulerRule {
+    fn state_count(&self) -> usize {
+        Self::gap_offset() + ROLLING_RECORD_BASE + ROLLING_RECORD_STATE_COUNT
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        let offset = worker_rule_state_count();
+        if let Some(port) = Self::decode_port(center) {
+            let composite = candidate_result_code(neighbours[1]);
+            return match port {
+                PORT_IDLE => match composite {
+                    Some(false) => Self::encode_port(PORT_READY_PRIME),
+                    Some(true) => Self::encode_port(PORT_READY_COMPOSITE),
+                    _ => Self::encode_port(PORT_IDLE),
+                },
+                PORT_READY_PRIME => Self::encode_port(PORT_RELEASE_PRIME),
+                PORT_READY_COMPOSITE => Self::encode_port(PORT_RELEASE_COMPOSITE),
+                PORT_RELEASE_PRIME | PORT_RELEASE_COMPOSITE => Self::encode_port(PORT_IDLE),
+                _ => 0,
+            };
+        }
+
+        if let Some(gap) = Self::decode_gap(center) {
+            let (lsb, bit, _, snapshot) = decode_rolling_gap_bit(gap).unwrap();
+            let (carry_in, snapshot_in) = if lsb {
+                let port = Self::decode_port(neighbours[1]);
+                (
+                    matches!(port, Some(PORT_RELEASE_PRIME | PORT_RELEASE_COMPOSITE)),
+                    port == Some(PORT_RELEASE_PRIME),
+                )
+            } else {
+                let west = Self::decode_gap(neighbours[3])
+                    .and_then(decode_rolling_gap_bit)
+                    .unwrap_or((false, false, false, false));
+                (west.2, west.3)
+            };
+            return Self::encode_gap(encode_rolling_gap_bit(
+                lsb,
+                if snapshot { false } else { bit ^ carry_in },
+                bit && carry_in,
+                snapshot_in,
+            ));
+        }
+
+        if let Some(record) = Self::decode_record(center) {
+            let mut bit = decode_record_bit(record).unwrap();
+            if let Some((_, source, _, true)) =
+                Self::decode_gap(neighbours[1]).and_then(decode_rolling_gap_bit)
+            {
+                bit = source;
+            }
+            return Self::encode_record(encode_record_bit(bit));
+        }
+
+        if candidate_result_code(center).is_some() && Self::port_at_idle(neighbours[6]) {
+            return recycle_candidate_result(center).unwrap();
+        }
+
+        let center = if center <= offset { center } else { 0 };
+        let mut local = [0; 8];
+        for slot in 0..8 {
+            local[slot] = if neighbours[slot] <= offset {
+                neighbours[slot]
+            } else {
+                0
+            };
+        }
+        RollingPrimeWorkerRule.next(center, local)
+    }
+}
+
+/// A fixed lane family that recycles each worker by the family stride.
+///
+/// The stride is stored on a static finite-state tape immediately south of each worker.  When a
+/// word grows, the stride tape grows one zero bit at the same east edge.  No candidate value,
+/// stride, or result is supplied after the initial CA configuration.
+pub struct RollingStrideSchedulerRule;
+
+impl RollingStrideSchedulerRule {
+    fn stride_offset() -> usize {
+        worker_rule_state_count() + ROLLING_PORT_STATE_COUNT
+    }
+
+    pub fn encode_stride(bit: bool) -> usize {
+        Self::stride_offset() + if bit { STRIDE_ONE } else { STRIDE_ZERO }
+    }
+
+    fn decode_stride(state: usize) -> Option<bool> {
+        let offset = Self::stride_offset();
+        match state {
+            state if state == offset + STRIDE_ZERO => Some(false),
+            state if state == offset + STRIDE_ONE => Some(true),
+            _ => None,
+        }
+    }
+}
+
+impl LocalRule for RollingStrideSchedulerRule {
+    fn state_count(&self) -> usize {
+        Self::stride_offset() + STRIDE_STATE_COUNT
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        let worker_states = worker_rule_state_count();
+        if Self::decode_stride(center).is_some() {
+            return center;
+        }
+
+        if let Some(port) = RollingPrimeSchedulerRule::decode_port(center) {
+            return match port {
+                PORT_IDLE => match candidate_result_code(neighbours[1]) {
+                    Some(false) => RollingPrimeSchedulerRule::encode_port(PORT_READY_PRIME),
+                    Some(true) => RollingPrimeSchedulerRule::encode_port(PORT_READY_COMPOSITE),
+                    _ => RollingPrimeSchedulerRule::encode_port(PORT_IDLE),
+                },
+                PORT_READY_PRIME => RollingPrimeSchedulerRule::encode_port(PORT_RELEASE_PRIME),
+                PORT_READY_COMPOSITE => {
+                    RollingPrimeSchedulerRule::encode_port(PORT_RELEASE_COMPOSITE)
+                }
+                PORT_RELEASE_PRIME | PORT_RELEASE_COMPOSITE => {
+                    RollingPrimeSchedulerRule::encode_port(PORT_IDLE)
+                }
+                _ => 0,
+            };
+        }
+
+        if center == 0
+            && Self::decode_stride(neighbours[3]).is_some()
+            && neighbours[6] > 0
+            && neighbours[6] <= worker_states
+        {
+            return Self::encode_stride(false);
+        }
+
+        if candidate_result_code(center).is_some()
+            && matches!(
+                RollingPrimeSchedulerRule::decode_port(neighbours[6]),
+                Some(PORT_RELEASE_PRIME | PORT_RELEASE_COMPOSITE)
+            )
+        {
+            return recycle_candidate_result_with_stride(center).unwrap();
+        }
+
+        let center = if center <= worker_states { center } else { 0 };
+        let mut local = [0; 8];
+        for slot in 0..8 {
+            local[slot] = if neighbours[slot] <= worker_states {
+                neighbours[slot]
+            } else {
+                0
+            };
+        }
+        let center =
+            worker_with_stride_bit(center, Self::decode_stride(neighbours[1]).unwrap_or(false));
+        local[3] = worker_with_stride_bit(
+            local[3],
+            Self::decode_stride(neighbours[0]).unwrap_or(false),
+        );
+        local[4] = worker_with_stride_bit(
+            local[4],
+            Self::decode_stride(neighbours[2]).unwrap_or(false),
+        );
+        RollingPrimeWorkerRule.next(center, local)
+    }
+}
+
+pub struct RollingBatchSchedulerRule;
+
+impl RollingBatchSchedulerRule {
+    fn merge_offset() -> usize {
+        RollingStrideSchedulerRule::stride_offset() + STRIDE_STATE_COUNT
+    }
+
+    fn encode_merge(cell: MergeCell) -> usize {
+        Self::merge_offset() + cell.encode()
+    }
+
+    fn decode_merge(state: usize) -> Option<MergeCell> {
+        MergeCell::decode(state.checked_sub(Self::merge_offset())?)
+    }
+
+    fn port_ready(state: usize) -> bool {
+        matches!(
+            RollingPrimeSchedulerRule::decode_port(state),
+            Some(PORT_READY_PRIME | PORT_READY_COMPOSITE)
+        )
+    }
+}
+
+impl LocalRule for RollingBatchSchedulerRule {
+    fn state_count(&self) -> usize {
+        Self::merge_offset() + MERGE_STATE_COUNT
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        if let Some(mut merge) = Self::decode_merge(center) {
+            let south = Self::decode_merge(neighbours[1]);
+            let north = Self::decode_merge(neighbours[6]);
+            let port_ready = Self::port_ready(neighbours[4]);
+            match merge.phase {
+                MergePhase::Idle => {
+                    if merge.role == MergeRole::Top && port_ready {
+                        merge.phase = MergePhase::CheckDown;
+                    } else if north
+                        .map(|cell| cell.phase == MergePhase::CheckDown)
+                        .unwrap_or(false)
+                        && (merge.role == MergeRole::Wire || port_ready)
+                    {
+                        merge.phase = MergePhase::CheckDown;
+                    } else if south
+                        .map(|cell| cell.phase == MergePhase::ReleaseUp)
+                        .unwrap_or(false)
+                    {
+                        merge.phase = MergePhase::ReleaseUp;
+                    }
+                }
+                MergePhase::CheckDown => {
+                    if merge.role == MergeRole::Bottom {
+                        merge.phase = MergePhase::ReleaseUp;
+                    } else if south
+                        .map(|cell| cell.role == MergeRole::Wire)
+                        .unwrap_or(false)
+                        || (south.is_some() && Self::port_ready(neighbours[2]))
+                    {
+                        merge.phase = if merge.role == MergeRole::Top {
+                            MergePhase::WaitReturn
+                        } else {
+                            MergePhase::Idle
+                        };
+                    }
+                }
+                MergePhase::WaitReturn => {
+                    if south
+                        .map(|cell| cell.phase == MergePhase::ReleaseUp)
+                        .unwrap_or(false)
+                    {
+                        merge.phase = MergePhase::ReleaseUp;
+                    }
+                }
+                MergePhase::ReleaseUp => {
+                    merge.phase = MergePhase::Idle;
+                }
+            }
+            return Self::encode_merge(merge);
+        }
+
+        if RollingStrideSchedulerRule::decode_stride(center).is_some() {
+            return center;
+        }
+
+        if let Some(port) = RollingPrimeSchedulerRule::decode_port(center) {
+            return match port {
+                PORT_IDLE => match candidate_result_code(neighbours[1]) {
+                    Some(false) => RollingPrimeSchedulerRule::encode_port(PORT_READY_PRIME),
+                    Some(true) => RollingPrimeSchedulerRule::encode_port(PORT_READY_COMPOSITE),
+                    _ => RollingPrimeSchedulerRule::encode_port(PORT_IDLE),
+                },
+                PORT_READY_PRIME
+                    if Self::decode_merge(neighbours[3])
+                        .map(|cell| cell.phase == MergePhase::ReleaseUp)
+                        .unwrap_or(false) =>
+                {
+                    RollingPrimeSchedulerRule::encode_port(PORT_RELEASE_PRIME)
+                }
+                PORT_READY_COMPOSITE
+                    if Self::decode_merge(neighbours[3])
+                        .map(|cell| cell.phase == MergePhase::ReleaseUp)
+                        .unwrap_or(false) =>
+                {
+                    RollingPrimeSchedulerRule::encode_port(PORT_RELEASE_COMPOSITE)
+                }
+                PORT_READY_PRIME => RollingPrimeSchedulerRule::encode_port(PORT_READY_PRIME),
+                PORT_READY_COMPOSITE => {
+                    RollingPrimeSchedulerRule::encode_port(PORT_READY_COMPOSITE)
+                }
+                PORT_RELEASE_PRIME | PORT_RELEASE_COMPOSITE => {
+                    RollingPrimeSchedulerRule::encode_port(PORT_IDLE)
+                }
+                _ => 0,
+            };
+        }
+
+        if center == 0
+            && RollingStrideSchedulerRule::decode_stride(neighbours[3]).is_some()
+            && neighbours[6] > 0
+            && neighbours[6] <= worker_rule_state_count()
+        {
+            return RollingStrideSchedulerRule::encode_stride(false);
+        }
+
+        if candidate_result_code(center).is_some()
+            && matches!(
+                RollingPrimeSchedulerRule::decode_port(neighbours[6]),
+                Some(PORT_RELEASE_PRIME | PORT_RELEASE_COMPOSITE)
+            )
+        {
+            return recycle_candidate_result_with_stride(center).unwrap();
+        }
+
+        let worker_states = worker_rule_state_count();
+        let center = if center <= worker_states { center } else { 0 };
+        let mut local = [0; 8];
+        for slot in 0..8 {
+            local[slot] = if neighbours[slot] <= worker_states {
+                neighbours[slot]
+            } else {
+                0
+            };
+        }
+        let center = worker_with_stride_bit(
+            center,
+            RollingStrideSchedulerRule::decode_stride(neighbours[1]).unwrap_or(false),
+        );
+        local[3] = worker_with_stride_bit(
+            local[3],
+            RollingStrideSchedulerRule::decode_stride(neighbours[0]).unwrap_or(false),
+        );
+        local[4] = worker_with_stride_bit(
+            local[4],
+            RollingStrideSchedulerRule::decode_stride(neighbours[2]).unwrap_or(false),
+        );
+        RollingPrimeWorkerRule.next(center, local)
+    }
+}
+
+pub struct RollingCandidate {
+    pub config: LogicalConfig,
+    pub steps: usize,
+    pub released: Vec<FifoResult>,
+    pub classified: Vec<usize>,
+    pub gaps: Vec<usize>,
+    pending_classified: Option<usize>,
+    gap_width: usize,
+}
+
+pub struct RollingCandidateField {
+    pub config: LogicalConfig,
+    pub steps: usize,
+    pub results: Vec<Vec<(usize, FifoResult)>>,
+    pending: Vec<Option<usize>>,
+    rows: Vec<i32>,
+}
+
+pub struct RollingBatchField {
+    pub config: LogicalConfig,
+    pub steps: usize,
+    pub batches: Vec<Vec<(usize, FifoResult)>>,
+    pending: Vec<Option<usize>>,
+    rows: Vec<i32>,
+    releasing: Vec<(usize, FifoResult)>,
 }
 
 impl IntegratedSchedulerRule {
@@ -330,6 +956,337 @@ impl IntegratedCandidate {
             value |= (set as usize) << bit;
         }
         Ok(value)
+    }
+}
+
+impl RollingCandidate {
+    pub fn new(candidate: usize) -> Result<Self, String> {
+        let mut config = PrimeWorker::new(candidate)?.config;
+        config.insert((0, 1), RollingPrimeSchedulerRule::encode_port(PORT_IDLE));
+        let gap_width = 16;
+        for bit in 0..gap_width {
+            config.insert(
+                (bit as i32, 2),
+                RollingPrimeSchedulerRule::encode_gap(encode_rolling_gap_bit(
+                    bit == 0,
+                    false,
+                    false,
+                    false,
+                )),
+            );
+            config.insert(
+                (bit as i32, 3),
+                RollingPrimeSchedulerRule::encode_record(encode_record_bit(false)),
+            );
+        }
+        Ok(RollingCandidate {
+            config,
+            steps: 0,
+            released: Vec::new(),
+            classified: Vec::new(),
+            gaps: Vec::new(),
+            pending_classified: None,
+            gap_width,
+        })
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        let snapshot_complete = self
+            .config
+            .get(&((self.gap_width - 1) as i32, 2))
+            .and_then(|state| RollingPrimeSchedulerRule::decode_gap(*state))
+            .and_then(decode_rolling_gap_bit)
+            .map(|(_, _, _, snapshot)| snapshot)
+            .unwrap_or(false);
+        if self
+            .config
+            .values()
+            .any(|state| candidate_result_code(*state).is_some())
+        {
+            self.pending_classified = worker_candidate_value(&self.config);
+        }
+        self.config = RollingPrimeSchedulerRule.step(&self.config)?;
+        self.steps += 1;
+        if let Some(result) = self.config.values().find_map(|state| {
+            let port = RollingPrimeSchedulerRule::decode_port(*state)?;
+            match port {
+                PORT_RELEASE_PRIME => Some(FifoResult::Prime),
+                PORT_RELEASE_COMPOSITE => Some(FifoResult::Composite),
+                _ => None,
+            }
+        }) {
+            self.released.push(result);
+            self.classified.push(
+                self.pending_classified
+                    .take()
+                    .ok_or_else(|| "rolling candidate result lost its tape value")?,
+            );
+        }
+        if snapshot_complete {
+            self.gaps.push(self.gap_value()?);
+        }
+        Ok(())
+    }
+
+    pub fn run_until_releases(
+        &mut self,
+        count: usize,
+        max_steps: usize,
+    ) -> Result<Vec<FifoResult>, String> {
+        while self.released.len() < count && self.steps < max_steps {
+            self.step()?;
+        }
+        if self.released.len() != count {
+            return Err(format!(
+                "rolling worker released {} of {} candidates in {} local steps",
+                self.released.len(),
+                count,
+                max_steps
+            ));
+        }
+        Ok(self.released.clone())
+    }
+
+    pub fn settle_gap(&mut self) -> Result<(), String> {
+        for _ in 0..self.gap_width {
+            self.step()?;
+        }
+        Ok(())
+    }
+
+    pub fn release_count(&self) -> Result<usize, String> {
+        let mut value = 0usize;
+        for bit in 0..self.gap_width {
+            let state = self
+                .config
+                .get(&(bit as i32, 2))
+                .ok_or_else(|| format!("rolling release counter lost bit {}", bit))?;
+            let raw = RollingPrimeSchedulerRule::decode_gap(*state)
+                .ok_or_else(|| "rolling release counter has an invalid state".to_string())?;
+            let (_, set, _, _) = decode_rolling_gap_bit(raw)
+                .ok_or_else(|| "rolling release counter bit cannot be decoded".to_string())?;
+            value |= (set as usize) << bit;
+        }
+        Ok(value)
+    }
+
+    pub fn gap_value(&self) -> Result<usize, String> {
+        let mut value = 0usize;
+        for bit in 0..self.gap_width {
+            let state = self
+                .config
+                .get(&(bit as i32, 3))
+                .ok_or_else(|| format!("rolling gap record lost bit {}", bit))?;
+            let raw = RollingPrimeSchedulerRule::decode_record(*state)
+                .ok_or_else(|| "rolling gap record has an invalid state".to_string())?;
+            let set = decode_record_bit(raw)
+                .ok_or_else(|| "rolling gap record bit cannot be decoded".to_string())?;
+            value |= (set as usize) << bit;
+        }
+        Ok(value)
+    }
+}
+
+impl RollingCandidateField {
+    pub fn new(start: usize, lanes: usize) -> Result<Self, String> {
+        Self::new_with_stride(start, lanes, lanes)
+    }
+
+    pub fn new_with_stride(start: usize, lanes: usize, stride: usize) -> Result<Self, String> {
+        if lanes == 0 {
+            return Err("a rolling candidate field needs at least one lane".to_string());
+        }
+        if stride == 0 {
+            return Err("a rolling candidate field needs a positive stride".to_string());
+        }
+        if start < 2 {
+            return Err("a rolling candidate field starts at an integer of at least 2".to_string());
+        }
+        let last = start
+            .checked_add(lanes - 1)
+            .ok_or_else(|| "rolling candidate field exceeds usize".to_string())?;
+        let width_value = last.max(stride);
+        let width = (usize::BITS - width_value.leading_zeros()) as usize + 1;
+
+        let mut config = LogicalConfig::new();
+        let mut rows = Vec::with_capacity(lanes);
+        for lane in 0..lanes {
+            let candidate = start
+                .checked_add(lane)
+                .ok_or_else(|| "rolling lane candidate exceeds usize".to_string())?;
+            let row = i32::try_from(lane)
+                .ok()
+                .and_then(|lane| lane.checked_mul(4))
+                .ok_or_else(|| "rolling lane geometry exceeds i32".to_string())?;
+            let worker = PrimeWorker::with_width(candidate, width)?;
+            for ((x, _), state) in worker.config {
+                config.insert((x, row), state);
+            }
+            config.insert(
+                (0, row + 1),
+                RollingPrimeSchedulerRule::encode_port(PORT_IDLE),
+            );
+            for x in 0..width as i32 {
+                let bit = x < usize::BITS as i32 && stride & (1usize << x as usize) != 0;
+                config.insert((x, row - 1), RollingStrideSchedulerRule::encode_stride(bit));
+            }
+            rows.push(row);
+        }
+        Ok(RollingCandidateField {
+            config,
+            steps: 0,
+            results: vec![Vec::new(); lanes],
+            pending: vec![None; lanes],
+            rows,
+        })
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        for (lane, row) in self.rows.iter().copied().enumerate() {
+            if self
+                .config
+                .get(&(0, row))
+                .and_then(|state| candidate_result_code(*state))
+                .is_some()
+            {
+                self.pending[lane] = worker_candidate_value_at(&self.config, row);
+            }
+        }
+        self.config = RollingStrideSchedulerRule.step(&self.config)?;
+        self.steps += 1;
+        for (lane, row) in self.rows.iter().copied().enumerate() {
+            let Some(state) = self.config.get(&(0, row + 1)) else {
+                return Err(format!("rolling lane {} lost its result port", lane));
+            };
+            let result = match RollingPrimeSchedulerRule::decode_port(*state) {
+                Some(PORT_RELEASE_PRIME) => Some(FifoResult::Prime),
+                Some(PORT_RELEASE_COMPOSITE) => Some(FifoResult::Composite),
+                _ => None,
+            };
+            if let Some(result) = result {
+                let candidate = self.pending[lane]
+                    .take()
+                    .ok_or_else(|| format!("rolling lane {} lost its candidate", lane))?;
+                self.results[lane].push((candidate, result));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn run_until_rounds(&mut self, rounds: usize, max_steps: usize) -> Result<(), String> {
+        while self.steps < max_steps && self.results.iter().any(|results| results.len() < rounds) {
+            self.step()?;
+        }
+        if self.results.iter().any(|results| results.len() < rounds) {
+            return Err(format!(
+                "rolling field did not complete {} rounds in {} local steps",
+                rounds, max_steps
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RollingBatchField {
+    pub fn new(start: usize, lanes: usize) -> Result<Self, String> {
+        Self::new_with_stride(start, lanes, lanes)
+    }
+
+    pub fn new_with_stride(start: usize, lanes: usize, stride: usize) -> Result<Self, String> {
+        if lanes < 2 {
+            return Err("a rolling batch field needs at least two lanes".to_string());
+        }
+        let field = RollingCandidateField::new_with_stride(start, lanes, stride)?;
+        let mut config = field.config;
+        let rows = field.rows;
+        let top = rows[0] + 1;
+        let bottom = rows[lanes - 1] + 1;
+        for y in top..=bottom {
+            let role = if y == top {
+                MergeRole::Bottom
+            } else if y == bottom {
+                MergeRole::Top
+            } else if rows.iter().any(|row| *row + 1 == y) {
+                MergeRole::Gate
+            } else {
+                MergeRole::Wire
+            };
+            config.insert(
+                (-1, y),
+                RollingBatchSchedulerRule::encode_merge(MergeCell {
+                    role,
+                    phase: MergePhase::Idle,
+                }),
+            );
+        }
+        Ok(RollingBatchField {
+            config,
+            steps: 0,
+            batches: Vec::new(),
+            pending: vec![None; lanes],
+            rows,
+            releasing: Vec::with_capacity(lanes),
+        })
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        for (lane, row) in self.rows.iter().copied().enumerate() {
+            if self
+                .config
+                .get(&(0, row))
+                .and_then(|state| candidate_result_code(*state))
+                .is_some()
+            {
+                self.pending[lane] = worker_candidate_value_at(&self.config, row);
+            }
+        }
+        self.config = RollingBatchSchedulerRule.step(&self.config)?;
+        self.steps += 1;
+
+        for (lane, row) in self.rows.iter().copied().enumerate() {
+            let state = self
+                .config
+                .get(&(0, row + 1))
+                .ok_or_else(|| format!("rolling batch lane {} lost its port", lane))?;
+            let result = match RollingPrimeSchedulerRule::decode_port(*state) {
+                Some(PORT_RELEASE_PRIME) => Some(FifoResult::Prime),
+                Some(PORT_RELEASE_COMPOSITE) => Some(FifoResult::Composite),
+                _ => None,
+            };
+            if let Some(result) = result {
+                if lane != self.releasing.len() {
+                    return Err(format!(
+                        "rolling merge released lane {} while waiting for lane {}",
+                        lane,
+                        self.releasing.len()
+                    ));
+                }
+                let candidate = self.pending[lane]
+                    .take()
+                    .ok_or_else(|| format!("rolling batch lane {} lost its candidate", lane))?;
+                self.releasing.push((candidate, result));
+            }
+        }
+        if self.releasing.len() == self.rows.len() {
+            self.batches.push(std::mem::take(&mut self.releasing));
+            self.releasing = Vec::with_capacity(self.rows.len());
+        }
+        Ok(())
+    }
+
+    pub fn run_until_batches(&mut self, count: usize, max_steps: usize) -> Result<(), String> {
+        while self.batches.len() < count && self.steps < max_steps {
+            self.step()?;
+        }
+        if self.batches.len() != count {
+            return Err(format!(
+                "rolling batch field released {} of {} batches in {} local steps",
+                self.batches.len(),
+                count,
+                max_steps
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -697,6 +1654,7 @@ impl OrderedFifo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::construct::BlockMachine;
 
     #[test]
     fn fifo_releases_only_the_oldest_ready_slot() {
@@ -775,6 +1733,163 @@ mod tests {
                 .count(),
             worker_cells
         );
+    }
+
+    #[test]
+    fn rolling_worker_recycles_without_host_reinitialisation() {
+        let first = 15usize;
+        let count = 26usize;
+        let mut candidate = RollingCandidate::new(first).unwrap();
+        let actual = candidate
+            .run_until_releases(count, 2_000_000)
+            .unwrap_or_else(|error| {
+                panic!("rolling worker after {} steps: {}", candidate.steps, error)
+            });
+        let expected = (first..first + count)
+            .map(|value| {
+                if (2..=value / 2).all(|divisor| value % divisor != 0) {
+                    FifoResult::Prime
+                } else {
+                    FifoResult::Composite
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            candidate.classified,
+            (first..first + count).collect::<Vec<_>>()
+        );
+        assert_eq!(actual, expected);
+        candidate.settle_gap().unwrap();
+        assert_eq!(candidate.gap_value().unwrap(), 6);
+        assert_eq!(candidate.release_count().unwrap(), 3);
+        assert_eq!(candidate.gaps, [3, 2, 4, 6, 2, 6]);
+        assert_eq!(
+            candidate
+                .config
+                .values()
+                .filter(|state| RollingPrimeSchedulerRule::decode_port(**state).is_some())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn rolling_scheduler_round_trips_through_large_binary_alphabet() {
+        let logical = RollingCandidate::new(15).unwrap().config;
+        let machine = BlockMachine::new(RollingPrimeSchedulerRule).unwrap();
+        assert!(machine.codec.width > 500_000);
+        let binary = machine.codec.encode(&logical).unwrap();
+        assert_eq!(machine.codec.decode(&binary).unwrap(), logical);
+        let next = machine.step_binary(&binary).unwrap();
+        let decoded = machine.codec.decode(&next).unwrap();
+        assert_eq!(decoded, RollingPrimeSchedulerRule.step(&logical).unwrap());
+        assert_eq!(next.len(), machine.codec.logical_weight(&decoded).unwrap());
+    }
+
+    #[test]
+    fn rolling_field_advances_all_lanes_by_its_local_stride() {
+        let start = 28usize;
+        let lanes = 4usize;
+        let rounds = 3usize;
+        let mut field = RollingCandidateField::new(start, lanes).unwrap();
+        field.run_until_rounds(rounds, 2_000_000).unwrap();
+        for lane in 0..lanes {
+            let actual: Vec<_> = field.results[lane]
+                .iter()
+                .take(rounds)
+                .map(|record| record.0)
+                .collect();
+            assert_eq!(
+                actual,
+                (0..rounds)
+                    .map(|round| start + lane + round * lanes)
+                    .collect::<Vec<_>>()
+            );
+            for &(candidate, result) in &field.results[lane] {
+                let prime =
+                    candidate >= 2 && (2..=candidate / 2).all(|divisor| candidate % divisor != 0);
+                assert_eq!(result == FifoResult::Prime, prime, "candidate {candidate}");
+            }
+        }
+        assert!(field.config.contains_key(&(6, 0)));
+        assert!(field
+            .config
+            .values()
+            .any(|state| RollingStrideSchedulerRule::decode_stride(*state) == Some(false)));
+    }
+
+    #[test]
+    fn rolling_batch_barrier_releases_consecutive_candidates_together() {
+        let start = 28usize;
+        let lanes = 4usize;
+        let stride = 12usize;
+        let rounds = 3usize;
+        let mut field = RollingBatchField::new_with_stride(start, lanes, stride).unwrap();
+        field.run_until_batches(rounds, 2_000_000).unwrap();
+        for (round, batch) in field.batches.iter().enumerate() {
+            let candidates: Vec<_> = batch.iter().map(|record| record.0).collect();
+            assert_eq!(
+                candidates,
+                (start + round * stride..start + round * stride + lanes).collect::<Vec<_>>()
+            );
+            for &(candidate, result) in batch {
+                let prime =
+                    candidate >= 2 && (2..=candidate / 2).all(|divisor| candidate % divisor != 0);
+                assert_eq!(result == FifoResult::Prime, prime, "candidate {candidate}");
+            }
+        }
+    }
+
+    #[test]
+    fn dyadic_epoch_certificate_closes_coverage_and_population_budget() {
+        assert_eq!(PrimeEpochPlan::first_certified_power().unwrap(), 86);
+        let before = PrimeEpochPlan::for_power(85).unwrap();
+        assert!(before.candidate_coverage > 1.9);
+        assert!(before.scheduler_fraction > 0.5);
+
+        let plan = PrimeEpochPlan::for_power(86).unwrap();
+        assert!(plan.certified());
+        assert!(plan.candidate_coverage > 1.9);
+        assert!(plan.scheduler_fraction < 0.46);
+        assert!(plan.maximum_gap_fraction < 0.00002);
+        assert_eq!(plan.lanes, 239);
+        assert_eq!(plan.word_bits, 90);
+        assert!(plan.ring_blocks > plan.gap_buffer_blocks);
+    }
+
+    #[test]
+    fn implemented_dusart_bounds_bracket_actual_prime_counts() {
+        let limit = 1usize << 19;
+        let mut prime = vec![true; limit + 1];
+        prime[0] = false;
+        prime[1] = false;
+        for divisor in 2..=integer_square_root(limit) {
+            if !prime[divisor] {
+                continue;
+            }
+            for multiple in (divisor * divisor..=limit).step_by(divisor) {
+                prime[multiple] = false;
+            }
+        }
+        let mut count = 0usize;
+        for value in 2..=limit {
+            count += prime[value] as usize;
+            if value.is_power_of_two() && value >= 1024 {
+                assert!(dusart_lower_pi(value as f64) <= count as f64);
+                assert!(count as f64 <= dusart_upper_pi(value as f64));
+            }
+        }
+    }
+
+    fn integer_square_root(value: usize) -> usize {
+        let mut root = (value as f64).sqrt() as usize;
+        while (root + 1) <= value / (root + 1) {
+            root += 1;
+        }
+        while root > value / root {
+            root -= 1;
+        }
+        root
     }
 
     #[test]

@@ -104,6 +104,14 @@ enum Phase {
     ColumnWire,
     ColumnPrimeNorth,
     ColumnCompositeNorth,
+    RecyclePrimeWest,
+    RecycleCompositeWest,
+    RecycleSeekWest,
+    RecycleIncrementEast,
+    RecycleReturnWest,
+    RecycleResetEast(u8),
+    RecycleStrideSeekWest,
+    RecycleStrideEast(bool),
 }
 
 impl Phase {
@@ -195,6 +203,18 @@ impl Phase {
             ColumnWire => 50,
             ColumnPrimeNorth => 51,
             ColumnCompositeNorth => 52,
+            RecyclePrimeWest => 53,
+            RecycleCompositeWest => 54,
+            RecycleSeekWest => 55,
+            RecycleIncrementEast => 56,
+            RecycleReturnWest => 57,
+            RecycleResetEast(offset) => {
+                debug_assert!(offset <= 3);
+                58 + offset as usize
+            }
+            RecycleStrideSeekWest => 62,
+            RecycleStrideEast(false) => 63,
+            RecycleStrideEast(true) => 64,
         }
     }
 
@@ -254,11 +274,20 @@ impl Phase {
             50 => ColumnWire,
             51 => ColumnPrimeNorth,
             52 => ColumnCompositeNorth,
+            53 => RecyclePrimeWest,
+            54 => RecycleCompositeWest,
+            55 => RecycleSeekWest,
+            56 => RecycleIncrementEast,
+            57 => RecycleReturnWest,
+            58..=61 => RecycleResetEast((code - 58) as u8),
+            62 => RecycleStrideSeekWest,
+            63 => RecycleStrideEast(false),
+            64 => RecycleStrideEast(true),
             _ => return None,
         })
     }
 
-    const COUNT: usize = 53;
+    const COUNT: usize = 65;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -420,6 +449,89 @@ fn transition_at(mut cell: WorkerCell) -> Transition {
             source: cell,
             target_phase: None,
         },
+        RecyclePrimeWest => {
+            if cell.lsb {
+                stay(cell, CandidatePrime)
+            } else {
+                emit(cell, Move::West, RecyclePrimeWest)
+            }
+        }
+        RecycleCompositeWest => {
+            if cell.lsb {
+                stay(cell, CandidateComposite)
+            } else {
+                emit(cell, Move::West, RecycleCompositeWest)
+            }
+        }
+        RecycleSeekWest => {
+            if cell.lsb {
+                stay(cell, RecycleIncrementEast)
+            } else {
+                emit(cell, Move::West, RecycleSeekWest)
+            }
+        }
+        RecycleIncrementEast => {
+            if cell.n {
+                cell.n = false;
+                if cell.msb {
+                    cell.msb = false;
+                }
+                emit(cell, Move::East, RecycleIncrementEast)
+            } else {
+                cell.n = true;
+                if cell.msb {
+                    cell.msb = false;
+                    emit(cell, Move::East, RecycleReturnWest)
+                } else if cell.lsb {
+                    stay(cell, RecycleResetEast(0))
+                } else {
+                    emit(cell, Move::West, RecycleReturnWest)
+                }
+            }
+        }
+        RecycleReturnWest => {
+            if cell.lsb {
+                stay(cell, RecycleResetEast(0))
+            } else {
+                emit(cell, Move::West, RecycleReturnWest)
+            }
+        }
+        RecycleResetEast(offset) => {
+            cell.divisor = offset == 1;
+            cell.square = offset == 2;
+            cell.remainder = false;
+            cell.cursor = false;
+            if cell.msb {
+                stay(cell, CompareSquare(Relation::Equal))
+            } else {
+                emit(cell, Move::East, RecycleResetEast((offset + 1).min(3)))
+            }
+        }
+        RecycleStrideSeekWest => {
+            if cell.lsb {
+                stay(cell, RecycleStrideEast(false))
+            } else {
+                emit(cell, Move::West, RecycleStrideSeekWest)
+            }
+        }
+        RecycleStrideEast(carry) => {
+            let sum = cell.n as u8 + cell.divisor as u8 + carry as u8;
+            cell.n = sum & 1 != 0;
+            let next_carry = sum > 1;
+            if cell.msb {
+                if next_carry {
+                    cell.msb = false;
+                    emit(cell, Move::East, RecycleStrideEast(true))
+                } else if cell.n {
+                    cell.msb = false;
+                    emit(cell, Move::East, RecycleReturnWest)
+                } else {
+                    emit(cell, Move::West, RecycleReturnWest)
+                }
+            } else {
+                emit(cell, Move::East, RecycleStrideEast(next_carry))
+            }
+        }
         CounterIncrementEast => {
             if cell.n {
                 cell.n = false;
@@ -823,6 +935,31 @@ impl LocalRule for PrimeWorkerRule {
                 }
                 .encode();
             }
+            if incoming.target_phase == Some((Move::East, Phase::RecycleIncrementEast)) {
+                return WorkerCell {
+                    n: true,
+                    msb: true,
+                    phase: Phase::RecycleReturnWest,
+                    ..WorkerCell::tape(false, false, false, false, false, false)
+                }
+                .encode();
+            }
+            if incoming.target_phase == Some((Move::East, Phase::RecycleReturnWest)) {
+                return WorkerCell {
+                    msb: true,
+                    phase: Phase::RecycleReturnWest,
+                    ..WorkerCell::tape(false, false, false, false, false, false)
+                }
+                .encode();
+            }
+            if let Some((Move::East, Phase::RecycleStrideEast(carry))) = incoming.target_phase {
+                return WorkerCell {
+                    msb: true,
+                    phase: Phase::RecycleStrideEast(carry),
+                    ..WorkerCell::tape(false, false, false, false, false, false)
+                }
+                .encode();
+            }
             return 0;
         };
         if let Some(reduced) = grid_reducer_next(center, neighbours) {
@@ -916,6 +1053,33 @@ impl LocalRule for PrimeWorkerRule {
     }
 }
 
+/// The worker's terminal result becomes a moving token.  At the word's LSB it is released as a
+/// candidate result; the scheduler can then turn that token into a local recycle sweep.
+pub struct RollingPrimeWorkerRule;
+
+impl LocalRule for RollingPrimeWorkerRule {
+    fn state_count(&self) -> usize {
+        PrimeWorkerRule.state_count()
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        if let Some(mut cell) = WorkerCell::decode(center) {
+            match cell.phase {
+                Phase::Prime => {
+                    cell.phase = Phase::RecyclePrimeWest;
+                    return cell.encode();
+                }
+                Phase::Composite => {
+                    cell.phase = Phase::RecycleCompositeWest;
+                    return cell.encode();
+                }
+                _ => {}
+            }
+        }
+        PrimeWorkerRule.next(center, neighbours)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerResult {
     Prime,
@@ -952,6 +1116,12 @@ pub fn worker_rule_state_count() -> usize {
     PrimeWorkerRule.state_count()
 }
 
+pub fn serial_worker_step_bound(candidate: usize) -> u128 {
+    let width = width_for(candidate) as u128;
+    let divisors = integer_sqrt(candidate).saturating_sub(1) as u128;
+    100 * divisors * (width * width + width + 1) + 10 * width
+}
+
 pub fn candidate_result_code(state: usize) -> Option<bool> {
     let cell = WorkerCell::decode(state)?;
     match cell.phase {
@@ -959,6 +1129,63 @@ pub fn candidate_result_code(state: usize) -> Option<bool> {
         Phase::CandidateComposite => Some(true),
         _ => None,
     }
+}
+
+pub fn recycle_candidate_result(state: usize) -> Option<usize> {
+    let mut cell = WorkerCell::decode(state)?;
+    cell.phase = match cell.phase {
+        Phase::CandidatePrime | Phase::CandidateComposite => Phase::RecycleSeekWest,
+        _ => return None,
+    };
+    Some(cell.encode())
+}
+
+pub fn recycle_candidate_result_with_stride(state: usize) -> Option<usize> {
+    let mut cell = WorkerCell::decode(state)?;
+    cell.phase = match cell.phase {
+        Phase::CandidatePrime | Phase::CandidateComposite => Phase::RecycleStrideSeekWest,
+        _ => return None,
+    };
+    Some(cell.encode())
+}
+
+pub fn worker_with_stride_bit(state: usize, stride_bit: bool) -> usize {
+    let Some(mut cell) = WorkerCell::decode(state) else {
+        return state;
+    };
+    if matches!(cell.phase, Phase::RecycleStrideEast(_)) {
+        cell.divisor = stride_bit;
+        cell.encode()
+    } else {
+        state
+    }
+}
+
+pub fn worker_candidate_value(config: &LogicalConfig) -> Option<usize> {
+    worker_candidate_value_at(config, 0)
+}
+
+pub fn worker_candidate_value_at(config: &LogicalConfig, row: i32) -> Option<usize> {
+    let mut value = 0usize;
+    let mut occupied = 0usize;
+    for ((x, y), state) in config {
+        if *y != row {
+            continue;
+        }
+        let Some(cell) = WorkerCell::decode(*state) else {
+            continue;
+        };
+        if *x < 0 || *x >= usize::BITS as i32 {
+            return None;
+        }
+        let bit = 1usize << *x;
+        if occupied & bit != 0 {
+            return None;
+        }
+        occupied |= bit;
+        value |= (cell.n as usize) << *x;
+    }
+    (occupied != 0).then_some(value)
 }
 
 pub struct ParallelCandidateField {
@@ -1023,6 +1250,16 @@ impl PrimeWorker {
             return Err("a trial-division worker needs an integer of at least 2".to_string());
         }
         let width = width_for(candidate);
+        Self::with_width(candidate, width)
+    }
+
+    pub fn with_width(candidate: usize, width: usize) -> Result<Self, String> {
+        if candidate < 2 {
+            return Err("a trial-division worker needs an integer of at least 2".to_string());
+        }
+        if width < width_for(candidate) || width > usize::BITS as usize + 1 {
+            return Err("trial-division worker width is insufficient or too large".to_string());
+        }
         let n = binary_bits(candidate, width);
         let divisor = binary_bits(2, width);
         let square = binary_bits(4, width);
@@ -1823,6 +2060,13 @@ mod tests {
                 "candidate {} after {} steps",
                 candidate,
                 worker.steps
+            );
+            assert!(
+                worker.steps as u128 <= serial_worker_step_bound(candidate),
+                "candidate {} took {} steps, bound {}",
+                candidate,
+                worker.steps,
+                serial_worker_step_bound(candidate)
             );
         }
     }

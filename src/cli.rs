@@ -16,7 +16,7 @@ use crate::progress::Progress;
 use crate::reference::{
     pattern_to_string, reference_states, render_evolution, verify_solution, SolutionRule,
 };
-use crate::scheduler::IntegratedCandidate;
+use crate::scheduler::{FifoResult, IntegratedCandidate, PrimeEpochPlan, RollingBatchField};
 use crate::sequences::parse_target;
 use crate::state_explorer::StateExplorer;
 use crate::table_search::{search, SearchParams, SearchReport, Solution, StopReason, SurvivalMode};
@@ -41,6 +41,8 @@ COMMANDS:
     mesh      Run the compact n^(1/4)-diameter parallel candidate mesh
     pipeline  Diagnostic ordered stream of candidates classified by local CA tiles
     scheduler Run one mesh candidate and release it through the integrated local FIFO
+    rolling   Recurrently classify stride-partitioned batches under one local CA rule
+    epoch     Print the conservative all-epoch coverage and population certificate
     space     Compare the legacy search-space size with the new one, per dimension
     legacy    The original expression-tree enumeration (only practical in dimension 1)
     help      Show this message
@@ -100,6 +102,16 @@ OPTIONS (pipeline):
 OPTIONS (scheduler):
     --candidate N           integer to classify and release                    [required]
     --max-steps N           local CA-step safety limit                    [default: 500000]
+
+OPTIONS (rolling):
+    --start N               first candidate in the first batch                 [default: 28]
+    --lanes N               consecutive candidates per batch                    [default: 4]
+    --stride N              candidate advance after each local recycle   [default: lanes]
+    --rounds N              ordered batches to release                          [default: 3]
+    --max-steps N           local CA-step safety limit                   [default: 2000000]
+
+OPTIONS (epoch):
+    --power K               certify the dyadic interval N=2^K                  [default: 86]
 
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
@@ -847,6 +859,73 @@ fn run_scheduler(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+fn run_rolling(opts: &Options) -> Result<(), String> {
+    let start = opts.number::<usize>("start")?.unwrap_or(28);
+    let lanes = opts.number::<usize>("lanes")?.unwrap_or(4);
+    let stride = opts.number::<usize>("stride")?.unwrap_or(lanes);
+    let rounds = opts.number::<usize>("rounds")?.unwrap_or(3);
+    let max_steps = opts.number::<usize>("max-steps")?.unwrap_or(2_000_000);
+    let mut field = RollingBatchField::new_with_stride(start, lanes, stride)?;
+    field.run_until_batches(rounds, max_steps)?;
+    println!("recurrent ordered candidate batches (one finite-state local rule):");
+    println!("  lanes          : {}", lanes);
+    println!("  lane stride    : {}", stride);
+    println!("  batches        : {}", field.batches.len());
+    println!("  local steps    : {}", field.steps);
+    println!("  logical cells  : {}", field.config.len());
+    for (round, batch) in field.batches.iter().enumerate() {
+        let summary = batch
+            .iter()
+            .map(|(candidate, result)| {
+                format!(
+                    "{}{}",
+                    candidate,
+                    if *result == FifoResult::Prime {
+                        "p"
+                    } else {
+                        "c"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("  batch {:>3}     : {}", round, summary);
+    }
+    println!("host code only observes the released stream; classification, backpressure,");
+    println!("stride advance, tape growth, reset, and lane ordering are local CA transitions.");
+    Ok(())
+}
+
+fn run_epoch(opts: &Options) -> Result<(), String> {
+    let power = opts.number::<u32>("power")?.unwrap_or(86);
+    let plan = PrimeEpochPlan::for_power(power)?;
+    println!("dyadic recurrent-scheduler certificate:");
+    println!("  interval floor       : 2^{}", plan.power);
+    println!("  candidate lanes      : {}", plan.lanes);
+    println!("  candidate word bits  : {}", plan.word_bits);
+    println!("  worker latency bound : {:.3e}", plan.worker_latency);
+    println!("  ring families        : {:.3e}", plan.ring_families);
+    println!("  ring logical blocks  : {:.3e}", plan.ring_blocks);
+    println!("  packed gap blocks    : {:.3e}", plan.gap_buffer_blocks);
+    println!(
+        "  scheduler live cells : {:.3e} ({:.6} of N)",
+        plan.scheduler_live_cells, plan.scheduler_fraction
+    );
+    println!(
+        "  candidate coverage   : {:.6} x next dyadic interval",
+        plan.candidate_coverage
+    );
+    println!("  max gap / N          : {:.8}", plan.maximum_gap_fraction);
+    println!("  certified            : {}", plan.certified());
+    println!(
+        "  first certified K    : {}",
+        PrimeEpochPlan::first_certified_power()?
+    );
+    println!("certificate covers throughput and mass; local epoch construction and");
+    println!("gap-record/output-mask transport remain the implementation boundary.");
+    Ok(())
+}
+
 /// The legacy search keeps every (birth, survival) expression pair in memory.
 const LEGACY_PAIR_LIMIT: u128 = 100_000_000;
 
@@ -907,6 +986,8 @@ pub fn run() {
         "mesh" => parse_options(&args[1..]).and_then(|o| run_mesh(&o)),
         "pipeline" => parse_options(&args[1..]).and_then(|o| run_pipeline(&o)),
         "scheduler" => parse_options(&args[1..]).and_then(|o| run_scheduler(&o)),
+        "rolling" => parse_options(&args[1..]).and_then(|o| run_rolling(&o)),
+        "epoch" => parse_options(&args[1..]).and_then(|o| run_epoch(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {

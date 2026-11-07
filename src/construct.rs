@@ -128,16 +128,20 @@ impl BlockCodec {
                 .ok_or_else(|| "too many logical states".to_string())?,
         )
         .map_err(|_| "too many logical states".to_string())?;
-        if width > 100_000 {
-            return Err("the requested block width is unreasonably large".to_string());
-        }
+        let stride_x = width
+            .checked_add(2)
+            .ok_or_else(|| "the block stride is too large".to_string())?;
+        stride_x
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(width.max(4)))
+            .ok_or_else(|| "the compiled block radius is too large".to_string())?;
         Ok(BlockCodec {
             state_count,
             ordinary_state_count,
             tail_state_count,
             width,
             height: 4,
-            stride_x: width + 2,
+            stride_x,
             stride_y: 6,
         })
     }
@@ -242,36 +246,13 @@ impl BlockCodec {
         binary: &BinaryConfig,
         anchor: LogicalPoint,
     ) -> Result<Option<usize>, String> {
-        let mut occupied = BTreeSet::new();
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let physical = (
-                    anchor
-                        .0
-                        .checked_add(x)
-                        .ok_or_else(|| "code block exceeds the physical grid".to_string())?,
-                    anchor
-                        .1
-                        .checked_add(y)
-                        .ok_or_else(|| "code block exceeds the physical grid".to_string())?,
-                );
-                if binary.contains(&physical) {
-                    occupied.insert((x, y));
-                }
-            }
-        }
+        let occupied = self.occupied_at_anchor(binary, anchor)?;
         if occupied.is_empty() {
             return Ok(None);
         }
-        for state in 1..self.state_count {
-            if occupied == self.codeword(state)? {
-                return Ok(Some(state));
-            }
-        }
-        Err(format!(
-            "invalid binary block at physical anchor {:?}",
-            anchor
-        ))
+        self.state_from_codeword(&occupied)
+            .map(Some)
+            .ok_or_else(|| format!("invalid binary block at physical anchor {:?}", anchor))
     }
 
     fn matching_state_at_anchor(
@@ -279,33 +260,79 @@ impl BlockCodec {
         binary: &BinaryConfig,
         anchor: LogicalPoint,
     ) -> Result<Option<usize>, String> {
-        let mut occupied = BTreeSet::new();
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let physical = (
-                    anchor
-                        .0
-                        .checked_add(x)
-                        .ok_or_else(|| "code block exceeds the physical grid".to_string())?,
-                    anchor
-                        .1
-                        .checked_add(y)
-                        .ok_or_else(|| "code block exceeds the physical grid".to_string())?,
-                );
-                if binary.contains(&physical) {
-                    occupied.insert((x, y));
-                }
-            }
-        }
+        let occupied = self.occupied_at_anchor(binary, anchor)?;
         if occupied.is_empty() {
             return Ok(None);
         }
-        for state in 1..self.state_count {
-            if occupied == self.codeword(state)? {
-                return Ok(Some(state));
+        Ok(self.state_from_codeword(&occupied))
+    }
+
+    fn occupied_at_anchor(
+        &self,
+        binary: &BinaryConfig,
+        anchor: LogicalPoint,
+    ) -> Result<BTreeSet<LogicalPoint>, String> {
+        let max_x = anchor
+            .0
+            .checked_add(self.width - 1)
+            .ok_or_else(|| "code block exceeds the physical grid".to_string())?;
+        let max_y = anchor
+            .1
+            .checked_add(self.height - 1)
+            .ok_or_else(|| "code block exceeds the physical grid".to_string())?;
+        let mut occupied = BTreeSet::new();
+        for &(x, y) in binary.range((anchor.0, i32::MIN)..=(max_x, i32::MAX)) {
+            if y < anchor.1 || y > max_y {
+                continue;
             }
+            occupied.insert((
+                x.checked_sub(anchor.0)
+                    .ok_or_else(|| "code block offset does not fit".to_string())?,
+                y.checked_sub(anchor.1)
+                    .ok_or_else(|| "code block offset does not fit".to_string())?,
+            ));
         }
-        Ok(None)
+        if occupied
+            .iter()
+            .any(|&(x, y)| x >= self.width || y >= self.height)
+        {
+            return Err("binary block read exceeded its codec bounds".to_string());
+        }
+        Ok(occupied)
+    }
+
+    fn state_from_codeword(&self, occupied: &BTreeSet<LogicalPoint>) -> Option<usize> {
+        let frame = BTreeSet::from([(0, 0), (2, 0), (1, 1)]);
+        if !frame.is_subset(occupied) {
+            return None;
+        }
+
+        if !occupied.contains(&(0, 2)) {
+            if occupied.len() != 4 {
+                return None;
+            }
+            let &(payload_x, payload_y) = occupied.iter().find(|point| !frame.contains(point))?;
+            if payload_y != 3 || payload_x < 3 {
+                return None;
+            }
+            let state = usize::try_from(payload_x - 2).ok()?;
+            return (state > 0 && state < self.ordinary_state_count).then_some(state);
+        }
+
+        let residue = occupied
+            .iter()
+            .filter(|(_, y)| *y == 3)
+            .map(|(x, _)| *x)
+            .collect::<BTreeSet<_>>();
+        if residue.iter().copied().ne(0..residue.len() as i32) {
+            return None;
+        }
+        let residue = residue.len();
+        if residue >= self.tail_state_count {
+            return None;
+        }
+        let state = self.ordinary_state_count + residue;
+        (occupied == &self.codeword(state).ok()?).then_some(state)
     }
 
     fn active_anchors(
