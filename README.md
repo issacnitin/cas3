@@ -347,10 +347,10 @@ The gap and mask bounds use Dusart's theorem that
 enough candidate throughput and enough ordinary-block reserve for every required split. The huge
 threshold is acceptable for an existence construction because everything below it can be a
 finite bootstrap; it is not intended as a practical simulation threshold. Run
-`epoch --power 88` to print the certificate.
+`epoch --power 88` to print the numerical resource check.
 
 The builder count is not claimed to stay fixed. With fixed-width rolling buffers it grows as
-\(O(\log N)\), while the epoch supplies \(\Theta(\log N)\) lane/build heads; the certificate checks
+\(O(\log N)\), while the epoch supplies \(\Theta(\log N)\) lane/build heads; the resource check tracks
 their ratio. The next ring is budgeted disjointly rather than assuming an unproved in-place
 transformation.
 
@@ -418,8 +418,8 @@ The remaining local construction is narrower than before but still essential:
 - build and recycle the dyadic ring geometry from ordinary reservoir blocks;
 - detach each acknowledged family record into its preassigned packed slot and compose subtraction,
   compacted rows and output decoders under the tagged epoch rule;
-- generate the next epoch's regular role/instruction geometry with the certified eight builder
-  heads;
+- generate the next epoch's regular role/instruction geometry with the checked \(O(\log N)\)
+  builder share;
 - prove arena ownership and reserved child vacancies at every output transition;
 - compile the finite bootstrap to the complete legal epoch configuration.
 

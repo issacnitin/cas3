@@ -43,7 +43,7 @@ COMMANDS:
     pipeline  Diagnostic ordered stream of candidates classified by local CA tiles
     scheduler Run one mesh candidate and release it through the integrated local FIFO
     rolling   Recurrently classify stride-partitioned batches under one local CA rule
-    epoch     Print the conservative all-epoch coverage and population certificate
+    epoch     Print the conservative dyadic coverage and population resource check
     mask      Decode one binary split count and commit a synchronized prime output
     space     Compare the legacy search-space size with the new one, per dimension
     legacy    The original expression-tree enumeration (only practical in dimension 1)
@@ -907,7 +907,7 @@ fn run_rolling(opts: &Options) -> Result<(), String> {
 fn run_epoch(opts: &Options) -> Result<(), String> {
     let power = opts.number::<u32>("power")?.unwrap_or(88);
     let plan = PrimeEpochPlan::for_power(power)?;
-    println!("dyadic recurrent-scheduler certificate:");
+    println!("dyadic recurrent-scheduler resource check:");
     println!("  interval floor       : 2^{}", plan.power);
     println!("  candidate lanes      : {}", plan.lanes);
     println!("  candidate word bits  : {}", plan.word_bits);
@@ -947,13 +947,13 @@ fn run_epoch(opts: &Options) -> Result<(), String> {
         "  next-epoch reserve   : {:.6}",
         plan.next_epoch_reserve_fraction()?
     );
-    println!("  certified            : {}", plan.certified());
+    println!("  numeric checks pass  : {}", plan.certified());
     println!(
-        "  first certified K    : {}",
+        "  first checked K      : {}",
         PrimeEpochPlan::first_certified_power()?
     );
-    println!("certificate covers throughput, mass, mask decoding, and packed queue timing;");
-    println!("family-to-slot insertion and epoch construction remain.");
+    println!("this f64 check covers throughput, mass, mask decoding, and queue timing;");
+    println!("exact all-t inequalities, slot insertion, and epoch construction remain.");
     Ok(())
 }
 
