@@ -331,7 +331,10 @@ is \(N=2^{86}\):
 - 239 candidates per admitted batch;
 - candidate coverage \(1.981394\) times the complete next dyadic interval;
 - scheduler live population \(0.453856N\);
-- explicit maximum prime gap below \(0.00001126N\).
+- complete next-ring construction cost below \(0.312N\);
+- next-epoch ordinary/output reserve above \(0.617N\);
+- explicit maximum prime gap below \(0.00001126N\);
+- worst-case local gap-to-mask decoding below \(0.095\) of one epoch.
 
 The last number uses Dusart's theorem that
 \([x,x+x/(25\ln^2x)]\) contains a prime for \(x\ge396738\). Thus the asymptotic schedule has both
@@ -339,6 +342,14 @@ enough candidate throughput and enough ordinary-block reserve for every required
 threshold is acceptable for an existence construction because everything below it can be a
 finite bootstrap; it is not intended as a practical simulation threshold. Run
 `epoch --power 86` to print the certificate.
+
+`src/mask_writer.rs` implements that local decoder rather than treating it as a timing oracle. A
+sparse \(O(\log g)\)-cell counter loads a binary split count, decrements it, shifts one cell and
+arms exactly one reservoir parent per decrement without changing active population.
+[Balzer's 8-state firing-squad rule](https://djm.cc/fsquad/firing-solution-balzer.html) then
+synchronizes the selected prefix. A permanent non-splitting sentinel
+applies the tail residue in the same generation, including the zero-split case. Direct block-code
+tests verify a one-generation binary change of exactly \(4k+\Delta r\).
 
 The older launch estimate is still useful for the compact one-shot mesh alternative:
 

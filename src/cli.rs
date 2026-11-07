@@ -9,6 +9,7 @@ use crate::construct::{
 };
 use crate::dashboard;
 use crate::lattice::Neighbourhood;
+use crate::mask_writer::SynchronizedPrimeOutput;
 use crate::prime_worker::{
     CandidateBatchPipeline, CandidateResult, MeshCandidate, ParallelCandidate, PrimeWorker,
 };
@@ -43,6 +44,7 @@ COMMANDS:
     scheduler Run one mesh candidate and release it through the integrated local FIFO
     rolling   Recurrently classify stride-partitioned batches under one local CA rule
     epoch     Print the conservative all-epoch coverage and population certificate
+    mask      Decode one binary split count and commit a synchronized prime output
     space     Compare the legacy search-space size with the new one, per dimension
     legacy    The original expression-tree enumeration (only practical in dimension 1)
     help      Show this message
@@ -112,6 +114,12 @@ OPTIONS (rolling):
 
 OPTIONS (epoch):
     --power K               certify the dyadic interval N=2^K                  [default: 86]
+
+OPTIONS (mask):
+    --splits K              ordinary four-cell births to synchronize             [default: 7]
+    --old-residue R         current tail payload residue, 0..3                    [default: 1]
+    --new-residue R         next tail payload residue, 0..3                       [default: 3]
+    --max-steps N           local CA-step safety limit                     [default: 100000]
 
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
@@ -916,13 +924,54 @@ fn run_epoch(opts: &Options) -> Result<(), String> {
         plan.candidate_coverage
     );
     println!("  max gap / N          : {:.8}", plan.maximum_gap_fraction);
+    println!("  mask latency bound   : {:.3e}", plan.mask_latency);
+    println!("  mask lead / epoch    : {:.6}", plan.mask_lead_fraction);
+    println!(
+        "  next-ring births / N : {:.6}",
+        plan.next_epoch_build_fraction()?
+    );
+    println!(
+        "  next-epoch reserve   : {:.6}",
+        plan.next_epoch_reserve_fraction()?
+    );
     println!("  certified            : {}", plan.certified());
     println!(
         "  first certified K    : {}",
         PrimeEpochPlan::first_certified_power()?
     );
-    println!("certificate covers throughput and mass; local epoch construction and");
-    println!("gap-record/output-mask transport remain the implementation boundary.");
+    println!("certificate covers throughput, mass, and local mask latency;");
+    println!("ordered gap-queue transport and epoch construction remain.");
+    Ok(())
+}
+
+fn run_mask(opts: &Options) -> Result<(), String> {
+    let splits = opts.number::<usize>("splits")?.unwrap_or(7);
+    let old_residue = opts.number::<usize>("old-residue")?.unwrap_or(1);
+    let new_residue = opts.number::<usize>("new-residue")?.unwrap_or(3);
+    let max_steps = opts.number::<usize>("max-steps")?.unwrap_or(100_000);
+    let width = (usize::BITS - splits.max(1).leading_zeros()) as usize + 1;
+    let mut output = SynchronizedPrimeOutput::new(splits, width, splits, old_residue, new_residue)?;
+    let before = output.binary_weight()?;
+    output.run_until_ready(max_steps)?;
+    let ready = output.binary_weight()?;
+    output.commit()?;
+    let after = output.binary_weight()?;
+    let expected = (4 * splits) as isize + new_residue as isize - old_residue as isize;
+    let actual = after as isize - ready as isize;
+    if before != ready || actual != expected {
+        return Err(format!(
+            "synchronized output changed by {}, expected {}; preparation {} -> {}",
+            actual, expected, before, ready
+        ));
+    }
+    println!("local synchronized prime-output gate:");
+    println!("  split parents     : {}", splits);
+    println!("  tail residue      : {} -> {}", old_residue, new_residue);
+    println!("  preparation steps : {}", output.steps - 1);
+    println!("  binary population : {} -> {}", ready, after);
+    println!("  exact delta       : {:+}", actual);
+    println!("binary record loading, prefix writing, firing-squad synchronization,");
+    println!("ordinary births, and tail adjustment are all local CA transitions.");
     Ok(())
 }
 
@@ -988,6 +1037,7 @@ pub fn run() {
         "scheduler" => parse_options(&args[1..]).and_then(|o| run_scheduler(&o)),
         "rolling" => parse_options(&args[1..]).and_then(|o| run_rolling(&o)),
         "epoch" => parse_options(&args[1..]).and_then(|o| run_epoch(&o)),
+        "mask" => parse_options(&args[1..]).and_then(|o| run_mask(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {

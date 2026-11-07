@@ -48,8 +48,14 @@ pub const STRIDE_ZERO: usize = 1;
 pub const STRIDE_ONE: usize = 2;
 pub const STRIDE_STATE_COUNT: usize = 3;
 const MERGE_ROLE_COUNT: usize = 4;
-const MERGE_PHASE_COUNT: usize = 4;
+const MERGE_PHASE_COUNT: usize = 6;
 const MERGE_STATE_COUNT: usize = 1 + MERGE_ROLE_COUNT * MERGE_PHASE_COUNT;
+const RESULT_PRIME: usize = 1;
+const RESULT_COMPOSITE: usize = 2;
+const RESULT_COLLECTOR: usize = 3;
+const RESULT_RELEASE_PRIME: usize = 4;
+const RESULT_RELEASE_COMPOSITE: usize = 5;
+const RESULT_STATE_COUNT: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MergeRole {
@@ -65,6 +71,8 @@ enum MergePhase {
     CheckDown,
     WaitReturn,
     ReleaseUp,
+    EmitPrime,
+    EmitComposite,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +94,8 @@ impl MergeCell {
             MergePhase::CheckDown => 1,
             MergePhase::WaitReturn => 2,
             MergePhase::ReleaseUp => 3,
+            MergePhase::EmitPrime => 4,
+            MergePhase::EmitComposite => 5,
         };
         1 + phase * MERGE_ROLE_COUNT + role
     }
@@ -107,6 +117,8 @@ impl MergeCell {
             1 => MergePhase::CheckDown,
             2 => MergePhase::WaitReturn,
             3 => MergePhase::ReleaseUp,
+            4 => MergePhase::EmitPrime,
+            5 => MergePhase::EmitComposite,
             _ => return None,
         };
         Some(MergeCell { role, phase })
@@ -257,6 +269,8 @@ pub struct PrimeEpochPlan {
     pub scheduler_fraction: f64,
     pub candidate_coverage: f64,
     pub maximum_gap_fraction: f64,
+    pub mask_latency: f64,
+    pub mask_lead_fraction: f64,
 }
 
 impl PrimeEpochPlan {
@@ -292,6 +306,10 @@ impl PrimeEpochPlan {
         let output_generations = (dusart_lower_pi(2.0 * lower) - dusart_upper_pi(lower)).max(0.0);
         let candidate_coverage = lanes as f64 * output_generations / (2.0 * lower);
         let maximum_gap_fraction = 1.0 / (25.0 * ln_n * ln_n);
+        let maximum_splits = lower * maximum_gap_fraction / 4.0;
+        let mask_width = (maximum_splits + 1.0).log2().ceil() + 1.0;
+        let mask_latency = (8.0 * mask_width + 2.0) * maximum_splits + 4.0 * mask_width;
+        let mask_lead_fraction = mask_latency / output_generations;
 
         Ok(PrimeEpochPlan {
             power,
@@ -306,6 +324,8 @@ impl PrimeEpochPlan {
             scheduler_fraction,
             candidate_coverage,
             maximum_gap_fraction,
+            mask_latency,
+            mask_lead_fraction,
         })
     }
 
@@ -314,6 +334,29 @@ impl PrimeEpochPlan {
             && self.candidate_coverage >= 1.0
             && self.scheduler_fraction <= 0.5
             && self.maximum_gap_fraction < 0.5
+            && self.mask_lead_fraction < 0.25
+            && self
+                .next_epoch_build_fraction()
+                .map(|fraction| fraction <= 0.5)
+                .unwrap_or(false)
+    }
+
+    pub fn next_epoch_build_fraction(&self) -> Result<f64, String> {
+        let next = Self::for_power(
+            self.power
+                .checked_add(1)
+                .ok_or_else(|| "next epoch power overflowed".to_string())?,
+        )?;
+        Ok((next.scheduler_live_cells - self.scheduler_live_cells) / self.lower)
+    }
+
+    pub fn next_epoch_reserve_fraction(&self) -> Result<f64, String> {
+        let next = Self::for_power(
+            self.power
+                .checked_add(1)
+                .ok_or_else(|| "next epoch power overflowed".to_string())?,
+        )?;
+        Ok((2.0 * self.lower - next.scheduler_live_cells) / (2.0 * self.lower))
     }
 
     pub fn first_certified_power() -> Result<u32, String> {
@@ -638,17 +681,38 @@ impl RollingBatchSchedulerRule {
         MergeCell::decode(state.checked_sub(Self::merge_offset())?)
     }
 
+    fn result_offset() -> usize {
+        Self::merge_offset() + MERGE_STATE_COUNT
+    }
+
+    fn encode_result(state: usize) -> usize {
+        Self::result_offset() + state
+    }
+
+    fn decode_result(state: usize) -> Option<usize> {
+        let raw = state.checked_sub(Self::result_offset())?;
+        (raw > 0 && raw < RESULT_STATE_COUNT).then_some(raw)
+    }
+
     fn port_ready(state: usize) -> bool {
         matches!(
             RollingPrimeSchedulerRule::decode_port(state),
             Some(PORT_READY_PRIME | PORT_READY_COMPOSITE)
         )
     }
+
+    fn emit_phase(state: usize) -> Option<MergePhase> {
+        match RollingPrimeSchedulerRule::decode_port(state) {
+            Some(PORT_READY_PRIME) => Some(MergePhase::EmitPrime),
+            Some(PORT_READY_COMPOSITE) => Some(MergePhase::EmitComposite),
+            _ => None,
+        }
+    }
 }
 
 impl LocalRule for RollingBatchSchedulerRule {
     fn state_count(&self) -> usize {
-        Self::merge_offset() + MERGE_STATE_COUNT
+        Self::result_offset() + RESULT_STATE_COUNT
     }
 
     fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
@@ -670,12 +734,16 @@ impl LocalRule for RollingBatchSchedulerRule {
                         .map(|cell| cell.phase == MergePhase::ReleaseUp)
                         .unwrap_or(false)
                     {
-                        merge.phase = MergePhase::ReleaseUp;
+                        merge.phase = if merge.role == MergeRole::Wire {
+                            MergePhase::ReleaseUp
+                        } else {
+                            Self::emit_phase(neighbours[4]).unwrap_or(MergePhase::Idle)
+                        };
                     }
                 }
                 MergePhase::CheckDown => {
                     if merge.role == MergeRole::Bottom {
-                        merge.phase = MergePhase::ReleaseUp;
+                        merge.phase = Self::emit_phase(neighbours[4]).unwrap_or(MergePhase::Idle);
                     } else if south
                         .map(|cell| cell.role == MergeRole::Wire)
                         .unwrap_or(false)
@@ -693,14 +761,36 @@ impl LocalRule for RollingBatchSchedulerRule {
                         .map(|cell| cell.phase == MergePhase::ReleaseUp)
                         .unwrap_or(false)
                     {
-                        merge.phase = MergePhase::ReleaseUp;
+                        merge.phase = Self::emit_phase(neighbours[4]).unwrap_or(MergePhase::Idle);
                     }
                 }
                 MergePhase::ReleaseUp => {
                     merge.phase = MergePhase::Idle;
                 }
+                MergePhase::EmitPrime | MergePhase::EmitComposite => {
+                    merge.phase = if merge.role == MergeRole::Top {
+                        MergePhase::Idle
+                    } else {
+                        MergePhase::ReleaseUp
+                    };
+                }
             }
             return Self::encode_merge(merge);
+        }
+
+        if let Some(result) = Self::decode_result(center) {
+            return match result {
+                RESULT_PRIME | RESULT_COMPOSITE => 0,
+                RESULT_COLLECTOR => match Self::decode_result(neighbours[6]) {
+                    Some(RESULT_PRIME) => Self::encode_result(RESULT_RELEASE_PRIME),
+                    Some(RESULT_COMPOSITE) => Self::encode_result(RESULT_RELEASE_COMPOSITE),
+                    _ => Self::encode_result(RESULT_COLLECTOR),
+                },
+                RESULT_RELEASE_PRIME | RESULT_RELEASE_COMPOSITE => {
+                    Self::encode_result(RESULT_COLLECTOR)
+                }
+                _ => 0,
+            };
         }
 
         if RollingStrideSchedulerRule::decode_stride(center).is_some() {
@@ -716,14 +806,14 @@ impl LocalRule for RollingBatchSchedulerRule {
                 },
                 PORT_READY_PRIME
                     if Self::decode_merge(neighbours[3])
-                        .map(|cell| cell.phase == MergePhase::ReleaseUp)
+                        .map(|cell| cell.phase == MergePhase::EmitPrime)
                         .unwrap_or(false) =>
                 {
                     RollingPrimeSchedulerRule::encode_port(PORT_RELEASE_PRIME)
                 }
                 PORT_READY_COMPOSITE
                     if Self::decode_merge(neighbours[3])
-                        .map(|cell| cell.phase == MergePhase::ReleaseUp)
+                        .map(|cell| cell.phase == MergePhase::EmitComposite)
                         .unwrap_or(false) =>
                 {
                     RollingPrimeSchedulerRule::encode_port(PORT_RELEASE_COMPOSITE)
@@ -737,6 +827,25 @@ impl LocalRule for RollingBatchSchedulerRule {
                 }
                 _ => 0,
             };
+        }
+
+        if center == 0 {
+            if let Some(merge) = Self::decode_merge(neighbours[4]) {
+                match merge.phase {
+                    MergePhase::EmitPrime => {
+                        return Self::encode_result(RESULT_PRIME);
+                    }
+                    MergePhase::EmitComposite => {
+                        return Self::encode_result(RESULT_COMPOSITE);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(result) = Self::decode_result(neighbours[6]) {
+                if matches!(result, RESULT_PRIME | RESULT_COMPOSITE) {
+                    return Self::encode_result(result);
+                }
+            }
         }
 
         if center == 0
@@ -804,6 +913,7 @@ pub struct RollingBatchField {
     pub config: LogicalConfig,
     pub steps: usize,
     pub batches: Vec<Vec<(usize, FifoResult)>>,
+    pub stream: Vec<FifoResult>,
     pending: Vec<Option<usize>>,
     rows: Vec<i32>,
     releasing: Vec<(usize, FifoResult)>,
@@ -1219,10 +1329,15 @@ impl RollingBatchField {
                 }),
             );
         }
+        config.insert(
+            (-2, 0),
+            RollingBatchSchedulerRule::encode_result(RESULT_COLLECTOR),
+        );
         Ok(RollingBatchField {
             config,
             steps: 0,
             batches: Vec::new(),
+            stream: Vec::new(),
             pending: vec![None; lanes],
             rows,
             releasing: Vec::with_capacity(lanes),
@@ -1242,6 +1357,13 @@ impl RollingBatchField {
         }
         self.config = RollingBatchSchedulerRule.step(&self.config)?;
         self.steps += 1;
+        if let Some(state) = self.config.get(&(-2, 0)) {
+            match RollingBatchSchedulerRule::decode_result(*state) {
+                Some(RESULT_RELEASE_PRIME) => self.stream.push(FifoResult::Prime),
+                Some(RESULT_RELEASE_COMPOSITE) => self.stream.push(FifoResult::Composite),
+                _ => {}
+            }
+        }
 
         for (lane, row) in self.rows.iter().copied().enumerate() {
             let state = self
@@ -1275,14 +1397,20 @@ impl RollingBatchField {
     }
 
     pub fn run_until_batches(&mut self, count: usize, max_steps: usize) -> Result<(), String> {
-        while self.batches.len() < count && self.steps < max_steps {
+        while (self.batches.len() < count
+            || self.stream.len() < count.saturating_mul(self.rows.len()))
+            && self.steps < max_steps
+        {
             self.step()?;
         }
-        if self.batches.len() != count {
+        if self.batches.len() != count || self.stream.len() != count.saturating_mul(self.rows.len())
+        {
             return Err(format!(
-                "rolling batch field released {} of {} batches in {} local steps",
+                "rolling batch field released {} batches and {} stream results; expected {} and {} in {} local steps",
                 self.batches.len(),
+                self.stream.len(),
                 count,
+                count.saturating_mul(self.rows.len()),
                 max_steps
             ));
         }
@@ -1838,6 +1966,14 @@ mod tests {
                 assert_eq!(result == FifoResult::Prime, prime, "candidate {candidate}");
             }
         }
+        assert_eq!(
+            field.stream,
+            field
+                .batches
+                .iter()
+                .flat_map(|batch| batch.iter().map(|record| record.1))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1852,6 +1988,9 @@ mod tests {
         assert!(plan.candidate_coverage > 1.9);
         assert!(plan.scheduler_fraction < 0.46);
         assert!(plan.maximum_gap_fraction < 0.00002);
+        assert!(plan.mask_lead_fraction < 0.095);
+        assert!(plan.next_epoch_build_fraction().unwrap() < 0.32);
+        assert!(plan.next_epoch_reserve_fraction().unwrap() > 0.61);
         assert_eq!(plan.lanes, 239);
         assert_eq!(plan.word_bits, 90);
         assert!(plan.ring_blocks > plan.gap_buffer_blocks);

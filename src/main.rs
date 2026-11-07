@@ -15,6 +15,8 @@ mod sequences;
 mod table_search;
 mod construct;
 mod bootstrap;
+mod firing_squad;
+mod mask_writer;
 mod prime_worker;
 mod scheduler;
 mod cli;

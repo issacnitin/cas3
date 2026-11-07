@@ -435,6 +435,133 @@ impl LocalRule for PreparedSplitRule {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitDirection {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl SplitDirection {
+    fn code(self) -> usize {
+        match self {
+            SplitDirection::North => 0,
+            SplitDirection::East => 1,
+            SplitDirection::South => 2,
+            SplitDirection::West => 3,
+        }
+    }
+}
+
+/// Constant-weight allocator gate for the scheduler arena.
+///
+/// Every idle role and every prepared instruction is an ordinary active logical state. A split
+/// parent returns to its requested parent role and creates exactly one requested child role in a
+/// cardinally adjacent empty block. Conflicting child claims create a persistent collision state,
+/// making a broken ownership invariant visible rather than silently selecting one claimant.
+pub struct PreparedRoleSplitRule {
+    roles: usize,
+}
+
+impl PreparedRoleSplitRule {
+    pub fn new(roles: usize) -> Result<Self, String> {
+        if roles == 0 {
+            return Err("a role-split allocator needs at least one active role".to_string());
+        }
+        roles
+            .checked_mul(roles)
+            .and_then(|pairs| pairs.checked_mul(4))
+            .and_then(|instructions| instructions.checked_add(roles + 2))
+            .ok_or_else(|| "the role-split alphabet is too large".to_string())?;
+        Ok(PreparedRoleSplitRule { roles })
+    }
+
+    pub fn idle(&self, role: usize) -> Result<usize, String> {
+        if role >= self.roles {
+            return Err(format!("allocator role {} is outside its alphabet", role));
+        }
+        Ok(1 + role)
+    }
+
+    pub fn collision(&self) -> usize {
+        1 + self.roles
+    }
+
+    pub fn split(
+        &self,
+        parent_role: usize,
+        child_role: usize,
+        direction: SplitDirection,
+    ) -> Result<usize, String> {
+        if parent_role >= self.roles || child_role >= self.roles {
+            return Err("allocator split role is outside its alphabet".to_string());
+        }
+        let pair = parent_role
+            .checked_mul(self.roles)
+            .and_then(|value| value.checked_add(child_role))
+            .ok_or_else(|| "allocator split state is too large".to_string())?;
+        Ok(2 + self.roles + direction.code() * self.roles * self.roles + pair)
+    }
+
+    fn decode_split(&self, state: usize) -> Option<(usize, usize, SplitDirection)> {
+        let raw = state.checked_sub(2 + self.roles)?;
+        let pairs = self.roles.checked_mul(self.roles)?;
+        if raw >= 4 * pairs {
+            return None;
+        }
+        let direction = match raw / pairs {
+            0 => SplitDirection::North,
+            1 => SplitDirection::East,
+            2 => SplitDirection::South,
+            3 => SplitDirection::West,
+            _ => return None,
+        };
+        let pair = raw % pairs;
+        Some((pair / self.roles, pair % self.roles, direction))
+    }
+
+    fn proposed_child(&self, neighbour: usize, required: SplitDirection) -> Option<usize> {
+        let (_, child, direction) = self.decode_split(neighbour)?;
+        (direction == required).then_some(child)
+    }
+}
+
+impl LocalRule for PreparedRoleSplitRule {
+    fn state_count(&self) -> usize {
+        2 + self.roles + 4 * self.roles * self.roles
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; NEIGHBOURS.len()]) -> usize {
+        if center == self.collision() {
+            return center;
+        }
+        if (1..=self.roles).contains(&center) {
+            return center;
+        }
+        if let Some((parent, _, _)) = self.decode_split(center) {
+            return self.idle(parent).unwrap();
+        }
+        if center != 0 {
+            return self.collision();
+        }
+
+        let proposals = [
+            self.proposed_child(neighbours[1], SplitDirection::North),
+            self.proposed_child(neighbours[3], SplitDirection::East),
+            self.proposed_child(neighbours[4], SplitDirection::West),
+            self.proposed_child(neighbours[6], SplitDirection::South),
+        ];
+        let mut proposed = None;
+        for child in proposals.into_iter().flatten() {
+            if proposed.replace(child).is_some() {
+                return self.collision();
+            }
+        }
+        proposed.map(|role| self.idle(role).unwrap()).unwrap_or(0)
+    }
+}
+
 /// One generation of the complete weighted output gate.
 ///
 /// Ordinary states 1 and 2 are idle/split.  States 3..6 request one of the four tail residues.
@@ -477,6 +604,97 @@ impl LocalRule for PreparedPrimeOutputRule {
             }
             _ => 0,
         }
+    }
+}
+
+/// Exact population gate whose split children may enter arbitrary scheduler roles.
+///
+/// Allocator idle/instruction states and the four residue requests are ordinary fixed-weight
+/// blocks. The four final states are the variable-weight tail. A prepared transition can therefore
+/// spend any subset of its ordinary births on new worker, wire, queue, or reservoir roles without
+/// changing the `W * splits + tail_delta` population equation.
+pub struct PreparedArenaOutputRule {
+    allocator: PreparedRoleSplitRule,
+    reservoir_role: usize,
+    request_base: usize,
+    tail_base: usize,
+}
+
+impl PreparedArenaOutputRule {
+    pub fn new(roles: usize, reservoir_role: usize) -> Result<Self, String> {
+        let allocator = PreparedRoleSplitRule::new(roles)?;
+        if reservoir_role >= roles {
+            return Err("the reservoir role is outside the allocator alphabet".to_string());
+        }
+        let request_base = allocator.state_count();
+        let tail_base = request_base
+            .checked_add(TAIL_RESIDUES)
+            .ok_or_else(|| "the arena output alphabet is too large".to_string())?;
+        tail_base
+            .checked_add(TAIL_RESIDUES)
+            .ok_or_else(|| "the arena output alphabet is too large".to_string())?;
+        Ok(PreparedArenaOutputRule {
+            allocator,
+            reservoir_role,
+            request_base,
+            tail_base,
+        })
+    }
+
+    pub fn ordinary_state_count(&self) -> usize {
+        self.tail_base
+    }
+
+    pub fn allocator(&self) -> &PreparedRoleSplitRule {
+        &self.allocator
+    }
+
+    pub fn request(&self, residue: usize) -> Result<usize, String> {
+        if residue >= TAIL_RESIDUES {
+            return Err("arena tail request is outside the residue range".to_string());
+        }
+        Ok(self.request_base + residue)
+    }
+
+    pub fn tail(&self, residue: usize) -> Result<usize, String> {
+        if residue >= TAIL_RESIDUES {
+            return Err("arena tail state is outside the residue range".to_string());
+        }
+        Ok(self.tail_base + residue)
+    }
+
+    fn requested_residue(&self, state: usize) -> Option<usize> {
+        (self.request_base..self.tail_base)
+            .contains(&state)
+            .then_some(state - self.request_base)
+    }
+}
+
+impl LocalRule for PreparedArenaOutputRule {
+    fn state_count(&self) -> usize {
+        self.tail_base + TAIL_RESIDUES
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; NEIGHBOURS.len()]) -> usize {
+        if center < self.allocator.state_count() {
+            let mut local = [0; NEIGHBOURS.len()];
+            for (slot, state) in neighbours.into_iter().enumerate() {
+                if state < self.allocator.state_count() {
+                    local[slot] = state;
+                }
+            }
+            return self.allocator.next(center, local);
+        }
+        if self.requested_residue(center).is_some() {
+            return self.allocator.idle(self.reservoir_role).unwrap();
+        }
+        if (self.tail_base..self.state_count()).contains(&center) {
+            return self.tail_base
+                + self
+                    .requested_residue(neighbours[1])
+                    .unwrap_or(center - self.tail_base);
+        }
+        0
     }
 }
 
@@ -1209,6 +1427,99 @@ mod test {
             2 * machine.codec.active_weight()
         );
         assert_eq!(machine.step_binary(&binary_before).unwrap(), binary_after);
+    }
+
+    #[test]
+    fn role_split_allocator_builds_typed_scheduler_cells_in_all_directions() {
+        let rule = PreparedRoleSplitRule::new(4).unwrap();
+        let source = LogicalConfig::from([
+            ((0, 0), rule.split(0, 1, SplitDirection::East).unwrap()),
+            ((4, 0), rule.split(1, 2, SplitDirection::West).unwrap()),
+            ((0, 4), rule.split(2, 3, SplitDirection::North).unwrap()),
+            ((4, 4), rule.split(3, 0, SplitDirection::South).unwrap()),
+        ]);
+        let next = rule.step(&source).unwrap();
+        assert_eq!(next.len(), source.len() + 4);
+        assert_eq!(next.get(&(0, 0)), Some(&rule.idle(0).unwrap()));
+        assert_eq!(next.get(&(1, 0)), Some(&rule.idle(1).unwrap()));
+        assert_eq!(next.get(&(4, 0)), Some(&rule.idle(1).unwrap()));
+        assert_eq!(next.get(&(3, 0)), Some(&rule.idle(2).unwrap()));
+        assert_eq!(next.get(&(0, 4)), Some(&rule.idle(2).unwrap()));
+        assert_eq!(next.get(&(0, 5)), Some(&rule.idle(3).unwrap()));
+        assert_eq!(next.get(&(4, 4)), Some(&rule.idle(3).unwrap()));
+        assert_eq!(next.get(&(4, 3)), Some(&rule.idle(0).unwrap()));
+
+        let machine = BlockMachine::new(rule).unwrap();
+        let binary = machine.codec.encode(&source).unwrap();
+        let direct = machine.step_binary_local(&binary).unwrap();
+        assert_eq!(direct, machine.step_binary(&binary).unwrap());
+        assert_eq!(
+            direct.len() - binary.len(),
+            4 * machine.codec.active_weight()
+        );
+    }
+
+    #[test]
+    fn role_split_allocator_surfaces_conflicting_vacancy_claims() {
+        let rule = PreparedRoleSplitRule::new(2).unwrap();
+        let source = LogicalConfig::from([
+            ((-1, 0), rule.split(0, 0, SplitDirection::East).unwrap()),
+            ((1, 0), rule.split(1, 1, SplitDirection::West).unwrap()),
+        ]);
+        let next = rule.step(&source).unwrap();
+        assert_eq!(next.get(&(0, 0)), Some(&rule.collision()));
+        assert_eq!(
+            rule.step(&next).unwrap().get(&(0, 0)),
+            Some(&rule.collision())
+        );
+    }
+
+    #[test]
+    fn arena_output_spends_prime_gap_births_on_typed_scheduler_roles() {
+        let rule = PreparedArenaOutputRule::new(4, 0).unwrap();
+        let allocator = rule.allocator();
+        let source = LogicalConfig::from([
+            ((0, 0), rule.tail(1).unwrap()),
+            ((0, -1), rule.request(3).unwrap()),
+            ((4, 0), allocator.split(0, 1, SplitDirection::East).unwrap()),
+            (
+                (8, 0),
+                allocator.split(0, 2, SplitDirection::North).unwrap(),
+            ),
+            (
+                (12, 0),
+                allocator.split(3, 3, SplitDirection::South).unwrap(),
+            ),
+        ]);
+        let codec =
+            BlockCodec::with_tail_states(rule.ordinary_state_count(), TAIL_RESIDUES).unwrap();
+        let machine = BlockMachine::with_codec(rule, codec).unwrap();
+        let before = machine.codec.logical_weight(&source).unwrap();
+        let next = machine.rule.step(&source).unwrap();
+        let after = machine.codec.logical_weight(&next).unwrap();
+        assert_eq!(after as isize - before as isize, 3 * 4 + 2);
+        assert_eq!(
+            next.get(&(5, 0)),
+            Some(&machine.rule.allocator().idle(1).unwrap())
+        );
+        assert_eq!(
+            next.get(&(8, 1)),
+            Some(&machine.rule.allocator().idle(2).unwrap())
+        );
+        assert_eq!(
+            next.get(&(12, -1)),
+            Some(&machine.rule.allocator().idle(3).unwrap())
+        );
+        assert_eq!(next.get(&(0, 0)), Some(&machine.rule.tail(3).unwrap()));
+        assert_eq!(
+            next.get(&(0, -1)),
+            Some(&machine.rule.allocator().idle(0).unwrap())
+        );
+
+        let binary = machine.codec.encode(&source).unwrap();
+        let direct = machine.step_binary_local(&binary).unwrap();
+        assert_eq!(direct, machine.step_binary(&binary).unwrap());
+        assert_eq!(direct.len() as isize - binary.len() as isize, 14);
     }
 
     #[test]
