@@ -1,4 +1,5 @@
 use crate::construct::{LocalRule, LogicalConfig};
+use crate::conveyor::{GatedHeadRing, GatedHeadRule};
 use crate::prime_worker::{
     candidate_result_code, recycle_candidate_result, worker_candidate_bit, worker_candidate_value,
     worker_is_msb, worker_rule_state_count, PrimeWorker, RollingPrimeWorkerRule,
@@ -19,7 +20,8 @@ const RECORD_DONE_ZERO: usize = 7;
 const RECORD_DONE_ONE: usize = 8;
 const RECORD_DONE_EMPTY: usize = 9;
 const RECORD_RESET: usize = 10;
-const RECORD_STATE_COUNT: usize = 11;
+const RECORD_ACK: usize = 11;
+const RECORD_STATE_COUNT: usize = 12;
 
 pub struct CandidateRecordRule;
 
@@ -129,6 +131,7 @@ impl LocalRule for CandidateRecordRule {
             }
             RECORD_DONE_ZERO | RECORD_DONE_ONE | RECORD_DONE_EMPTY => record,
             RECORD_RESET => RECORD_PAD,
+            RECORD_ACK => RECORD_RESET,
             _ => RECORD_DONE_EMPTY,
         };
         Self::encode(next)
@@ -202,6 +205,122 @@ impl LocalRule for RollingRecordedWorkerRule {
     }
 }
 
+pub struct FamilyStationRule;
+
+impl FamilyStationRule {
+    fn head_offset() -> usize {
+        CandidateRecordRule.state_count()
+    }
+
+    fn encode_head(state: usize) -> usize {
+        if state == 0 {
+            0
+        } else {
+            Self::head_offset() + state - 1
+        }
+    }
+
+    fn decode_head(state: usize) -> Option<usize> {
+        if state == 0 {
+            Some(0)
+        } else {
+            state
+                .checked_sub(Self::head_offset())
+                .map(|state| state + 1)
+                .filter(|state| *state < GatedHeadRule.state_count())
+        }
+    }
+
+    fn record_done(state: usize) -> bool {
+        matches!(
+            CandidateRecordRule::decode(state),
+            Some(RECORD_DONE_ZERO | RECORD_DONE_ONE | RECORD_DONE_EMPTY)
+        )
+    }
+}
+
+impl LocalRule for FamilyStationRule {
+    fn state_count(&self) -> usize {
+        CandidateRecordRule.state_count() + GatedHeadRule.state_count() - 1
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        if center >= Self::head_offset() {
+            let raw = Self::decode_head(center).unwrap();
+            if GatedHeadRule::gate_is_waiting(raw) {
+                if let Some(slot) = GatedHeadRule::gate_station_slot(raw) {
+                    if Self::record_done(neighbours[slot]) {
+                        return Self::encode_head(GatedHeadRule::rearm_gate(raw).unwrap());
+                    }
+                }
+            }
+            let mut local = [0; 8];
+            for slot in 0..8 {
+                local[slot] = Self::decode_head(neighbours[slot]).unwrap_or(0);
+            }
+            return Self::encode_head(GatedHeadRule.next(raw, local));
+        }
+
+        if center == 0 {
+            let worker_states = worker_rule_state_count();
+            if worker_candidate_bit(neighbours[SOUTH]).is_some()
+                && CandidateRecordRule::decode(neighbours[WEST]).is_some()
+            {
+                return CandidateRecordRule::encode(RECORD_PAD);
+            }
+            let mut local = [0; 8];
+            for slot in 0..8 {
+                if neighbours[slot] <= worker_states {
+                    local[slot] = neighbours[slot];
+                }
+            }
+            return RollingPrimeWorkerRule.next(0, local);
+        }
+
+        if let Some(record) = CandidateRecordRule::decode(center) {
+            let acknowledged = neighbours.iter().any(|state| {
+                Self::decode_head(*state)
+                    .map(GatedHeadRule::gate_is_acknowledged)
+                    .unwrap_or(false)
+            });
+            if Self::record_done(center) && acknowledged {
+                return CandidateRecordRule::encode(RECORD_ACK);
+            }
+            if record == RECORD_ACK {
+                return CandidateRecordRule::encode(RECORD_RESET);
+            }
+            let result = candidate_result_code(neighbours[SOUTH]);
+            if record == RECORD_PAD && CandidateRecordRule::decode(neighbours[WEST]).is_none() {
+                return match result {
+                    Some(false) => CandidateRecordRule::encode(RECORD_WAVE),
+                    Some(true) => CandidateRecordRule::encode(RECORD_DONE_EMPTY),
+                    None => CandidateRecordRule.next(center, neighbours),
+                };
+            }
+            return CandidateRecordRule.next(center, neighbours);
+        }
+
+        if candidate_result_code(center).is_some() {
+            let acknowledged = CandidateRecordRule::decode(neighbours[NORTH]) == Some(RECORD_ACK);
+            return if acknowledged {
+                recycle_candidate_result(center).unwrap()
+            } else {
+                center
+            };
+        }
+
+        let worker_states = worker_rule_state_count();
+        let center = if center <= worker_states { center } else { 0 };
+        let mut local = [0; 8];
+        for slot in 0..8 {
+            if neighbours[slot] <= worker_states {
+                local[slot] = neighbours[slot];
+            }
+        }
+        RollingPrimeWorkerRule.next(center, local)
+    }
+}
+
 pub struct CandidateRecordWriter {
     pub config: LogicalConfig,
     pub steps: usize,
@@ -212,6 +331,13 @@ pub struct RollingRecordedWorker {
     pub config: LogicalConfig,
     pub steps: usize,
     pub records: Vec<(usize, Option<usize>)>,
+}
+
+pub struct FamilyStation {
+    pub config: LogicalConfig,
+    pub steps: usize,
+    candidate_origin: (i32, i32),
+    initial_candidate: usize,
 }
 
 pub struct PackedCandidateRecordRule {
@@ -496,6 +622,90 @@ impl RollingRecordedWorker {
     }
 }
 
+impl FamilyStation {
+    pub fn new(candidate: usize) -> Result<Self, String> {
+        let mut ring = GatedHeadRing::new_with_stations(4, 4, &[0])?;
+        ring.set_all_gates_waiting();
+        let (_, station) = ring.station_site(0)?;
+        let candidate_origin = (station.0, station.1 - 1);
+        let worker = RollingRecordedWorker::new(candidate)?;
+        let mut config = LogicalConfig::new();
+        for (point, state) in ring.config {
+            config.insert(point, FamilyStationRule::encode_head(state));
+        }
+        for ((x, y), state) in worker.config {
+            let point = (candidate_origin.0 + x, candidate_origin.1 + y);
+            if config.insert(point, state).is_some() {
+                return Err(format!("family station geometry overlaps at {:?}", point));
+            }
+        }
+        Ok(FamilyStation {
+            config,
+            steps: 0,
+            candidate_origin,
+            initial_candidate: candidate,
+        })
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        self.config = FamilyStationRule.step(&self.config)?;
+        self.steps += 1;
+        Ok(())
+    }
+
+    pub fn candidate(&self) -> Option<usize> {
+        let mut value = 0usize;
+        let mut occupied = false;
+        for ((x, y), state) in &self.config {
+            if *y != self.candidate_origin.1 || *x < self.candidate_origin.0 {
+                continue;
+            }
+            let bit = worker_candidate_bit(*state)?;
+            let offset = usize::try_from(*x - self.candidate_origin.0).ok()?;
+            if offset >= usize::BITS as usize {
+                return None;
+            }
+            value |= (bit as usize) << offset;
+            occupied = true;
+        }
+        occupied.then_some(value)
+    }
+
+    pub fn run_until_recycled(&mut self, max_steps: usize) -> Result<(), String> {
+        let target = self
+            .initial_candidate
+            .checked_add(1)
+            .ok_or_else(|| "family station candidate overflowed".to_string())?;
+        while self.candidate() != Some(target) && self.steps < max_steps {
+            self.step()?;
+        }
+        if self.candidate() != Some(target) {
+            return Err(format!(
+                "family station did not recycle candidate {} in {} steps; current {:?}",
+                self.initial_candidate,
+                max_steps,
+                self.candidate()
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn run_until_candidate(&mut self, target: usize, max_steps: usize) -> Result<(), String> {
+        while self.candidate() != Some(target) && self.steps < max_steps {
+            self.step()?;
+        }
+        if self.candidate() != Some(target) {
+            return Err(format!(
+                "family station did not reach candidate {} in {} steps; current {:?}",
+                target,
+                max_steps,
+                self.candidate()
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PackedCandidateRecordWriter {
     pub fn new(candidate: usize, prime: bool, payload_bits: usize) -> Result<Self, String> {
         let rule = PackedCandidateRecordRule::new(payload_bits)?;
@@ -687,6 +897,26 @@ mod tests {
         assert_eq!(
             machine.codec.decode(&next).unwrap(),
             machine.rule.step(&worker.config).unwrap()
+        );
+        assert_eq!(binary.len(), next.len());
+    }
+
+    #[test]
+    fn gated_ring_acknowledges_record_before_worker_recycle() {
+        let mut station = FamilyStation::new(29).unwrap();
+        station.run_until_candidate(34, 2_000_000).unwrap();
+        assert_eq!(station.candidate(), Some(34));
+    }
+
+    #[test]
+    fn family_station_product_compiles_to_binary_blocks() {
+        let station = FamilyStation::new(29).unwrap();
+        let machine = BlockMachine::new(FamilyStationRule).unwrap();
+        let binary = machine.codec.encode(&station.config).unwrap();
+        let next = machine.step_binary(&binary).unwrap();
+        assert_eq!(
+            machine.codec.decode(&next).unwrap(),
+            machine.rule.step(&station.config).unwrap()
         );
         assert_eq!(binary.len(), next.len());
     }

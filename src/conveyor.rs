@@ -186,6 +186,22 @@ impl GatedHeadRule {
         (phase == GATE_WAITING).then(|| Self::encode_gate(direction, GATE_READY))
     }
 
+    pub(crate) fn wait_gate(state: usize) -> Option<usize> {
+        let (direction, _) = Self::decode_gate(state)?;
+        Some(Self::encode_gate(direction, GATE_WAITING))
+    }
+
+    pub(crate) fn gate_station_slot(state: usize) -> Option<usize> {
+        let (track_direction, _) = Self::decode_gate(state)?;
+        Pull::direction_slot(match track_direction {
+            GATE_NORTH => GATE_SOUTH,
+            GATE_EAST => GATE_WEST,
+            GATE_SOUTH => GATE_NORTH,
+            GATE_WEST => GATE_EAST,
+            _ => return None,
+        })
+    }
+
     fn gate_ready(track: HeadTrack, neighbours: [usize; 8]) -> bool {
         track.gate == GATE_NONE
             || Pull::direction_slot(track.gate)
@@ -283,10 +299,22 @@ pub struct GatedHeadRing {
 
 impl GatedHeadRing {
     pub fn new(width: usize, height: usize) -> Result<Self, String> {
+        let length = rectangle_path(width, height)?.len();
+        Self::new_with_stations(width, height, &(0..length).collect::<Vec<_>>())
+    }
+
+    pub fn new_with_stations(
+        width: usize,
+        height: usize,
+        stations: &[usize],
+    ) -> Result<Self, String> {
         if width < 3 || height < 3 {
             return Err("a gated head ring must be at least 3 by 3".to_string());
         }
         let path = rectangle_path(width, height)?;
+        if stations.iter().any(|index| *index >= path.len()) {
+            return Err("gated head station index is outside the ring".to_string());
+        }
         let width_i32 =
             i32::try_from(width).map_err(|_| "head ring width does not fit i32".to_string())?;
         let height_i32 =
@@ -295,7 +323,9 @@ impl GatedHeadRing {
         for (index, point) in path.iter().copied().enumerate() {
             let successor = path[(index + 1) % path.len()];
             let push = Pull::direction_code((successor.0 - point.0, successor.1 - point.1))?;
-            let gate = if point.1 == 0 && push == GATE_EAST {
+            let gate = if !stations.contains(&index) {
+                GATE_NONE
+            } else if point.1 == 0 && push == GATE_EAST {
                 GATE_SOUTH
             } else if point.0 == width_i32 - 1 && push == GATE_NORTH {
                 GATE_EAST
@@ -312,6 +342,9 @@ impl GatedHeadRing {
                     phase: usize::from(index == 0),
                 }),
             );
+            if gate == GATE_NONE {
+                continue;
+            }
             let gate_point = match gate {
                 GATE_NORTH => (point.0, point.1 + 1),
                 GATE_EAST => (point.0 + 1, point.1),
@@ -349,6 +382,35 @@ impl GatedHeadRing {
         self.config = GatedHeadRule.step(&self.config)?;
         self.steps += 1;
         Ok(())
+    }
+
+    pub fn set_all_gates_waiting(&mut self) {
+        for state in self.config.values_mut() {
+            if let Some(waiting) = GatedHeadRule::wait_gate(*state) {
+                *state = waiting;
+            }
+        }
+    }
+
+    pub fn station_site(&self, index: usize) -> Result<(LogicalPoint, LogicalPoint), String> {
+        let point = *self
+            .path
+            .get(index)
+            .ok_or_else(|| "gated head station index is outside the ring".to_string())?;
+        let track = self
+            .config
+            .get(&point)
+            .and_then(|state| GatedHeadRule::decode_track(*state))
+            .ok_or_else(|| "gated head ring lost its track state".to_string())?;
+        let delta = match track.gate {
+            GATE_NORTH => (0, 1),
+            GATE_EAST => (1, 0),
+            GATE_SOUTH => (0, -1),
+            GATE_WEST => (-1, 0),
+            _ => return Err("gated head track has no station gate".to_string()),
+        };
+        let gate = (point.0 + delta.0, point.1 + delta.1);
+        Ok((gate, (gate.0 + delta.0, gate.1 + delta.1)))
     }
 
     pub fn head_index(&self) -> Option<usize> {

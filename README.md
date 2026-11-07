@@ -374,11 +374,17 @@ between them. `src/conveyor.rs` provides population-neutral cyclic transport for
 payload order is preserved around a finite local rectangle, and parallel copies carry every chunk
 of a record column.
 
+`TaggedPairRule` in `src/construct.rs` supplies the generic disjoint-alphabet union used to place
+independent finite-state modules under one homogeneous logical rule before adding the explicit
+bridge states above.
+
 `src/record_writer.rs` supplies the family-side format conversion. A prime result freezes its
 distributed candidate tape, copies the bits into an active record row, and packs fixed groups of
 bits into queue chunks with local moving heads; a composite leaves a padding hole. The recurrent
 product rule performs classification, copy/backpressure, record reset, guard-bit growth and worker
-recycle without a host transition between candidates. `src/gap_plan.rs`
+recycle without a host transition between candidates. A second product attaches that lane to a
+sparse-gated alternating ring: the completed record rearms its station, the head acknowledges it,
+and only then may the record reset and the worker advance. `src/gap_plan.rs`
 then implements the exact weight-four arithmetic after consecutive prime records are subtracted:
 adding the current two-bit tail residue makes the low two sum bits the next residue and all higher
 bits the split count. The synchronized typed-output variant can assign every split child a concrete
@@ -410,8 +416,8 @@ until those tables and the induction are present.
 The remaining local construction is narrower than before but still essential:
 
 - build and recycle the dyadic ring geometry from ordinary reservoir blocks;
-- compose family record writers, gated slot stations, subtraction and compacted rows under one
-  tagged rule;
+- detach each acknowledged family record into its preassigned packed slot and compose subtraction,
+  compacted rows and output decoders under the tagged epoch rule;
 - generate the next epoch's regular role/instruction geometry with the certified eight builder
   heads;
 - prove arena ownership and reserved child vacancies at every output transition;

@@ -86,6 +86,93 @@ pub trait LocalRule {
     }
 }
 
+/// Disjoint tagged union of two quiescent local rules.
+///
+/// State zero is shared. Active states from `left` retain their codes; active states from `right`
+/// are shifted above the left alphabet. Each component sees only neighbours carrying its own tag.
+/// Bridge states can be layered above this product when one component must signal another.
+pub struct TaggedPairRule<L, R> {
+    pub left: L,
+    pub right: R,
+    left_states: usize,
+    right_states: usize,
+}
+
+impl<L: LocalRule, R: LocalRule> TaggedPairRule<L, R> {
+    pub fn new(left: L, right: R) -> Result<Self, String> {
+        let left_states = left.state_count();
+        let right_states = right.state_count();
+        if left_states < 2 || right_states < 2 {
+            return Err("tagged rules need quiescence plus an active state".to_string());
+        }
+        left_states
+            .checked_add(right_states - 1)
+            .ok_or_else(|| "tagged product alphabet is too large".to_string())?;
+        Ok(TaggedPairRule {
+            left,
+            right,
+            left_states,
+            right_states,
+        })
+    }
+
+    pub fn encode_left(&self, state: usize) -> Result<usize, String> {
+        if state >= self.left_states {
+            return Err("left tagged state is outside its alphabet".to_string());
+        }
+        Ok(state)
+    }
+
+    pub fn encode_right(&self, state: usize) -> Result<usize, String> {
+        if state >= self.right_states {
+            return Err("right tagged state is outside its alphabet".to_string());
+        }
+        Ok(if state == 0 {
+            0
+        } else {
+            self.left_states + state - 1
+        })
+    }
+
+    pub fn decode_left(&self, state: usize) -> Option<usize> {
+        (state < self.left_states).then_some(state)
+    }
+
+    pub fn decode_right(&self, state: usize) -> Option<usize> {
+        if state == 0 {
+            Some(0)
+        } else if (self.left_states..self.state_count()).contains(&state) {
+            Some(state - self.left_states + 1)
+        } else {
+            None
+        }
+    }
+}
+
+impl<L: LocalRule, R: LocalRule> LocalRule for TaggedPairRule<L, R> {
+    fn state_count(&self) -> usize {
+        self.left_states + self.right_states - 1
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; NEIGHBOURS.len()]) -> usize {
+        if center < self.left_states {
+            let mut local = [0; NEIGHBOURS.len()];
+            for slot in 0..NEIGHBOURS.len() {
+                local[slot] = self.decode_left(neighbours[slot]).unwrap_or(0);
+            }
+            return self.left.next(center, local);
+        }
+        let Some(center) = self.decode_right(center) else {
+            return 0;
+        };
+        let mut local = [0; NEIGHBOURS.len()];
+        for slot in 0..NEIGHBOURS.len() {
+            local[slot] = self.decode_right(neighbours[slot]).unwrap_or(0);
+        }
+        self.encode_right(self.right.next(center, local)).unwrap()
+    }
+}
+
 /// A fixed frame plus one payload bit is a self-synchronising binary code for a logical state.
 ///
 /// The three frame bits have the asymmetric pattern `101 / 010`, followed by a payload row
@@ -1259,6 +1346,41 @@ mod test {
             );
         }
         assert!(codec.tail_codeword(codec.active_weight()).is_err());
+    }
+
+    #[test]
+    fn tagged_rules_evolve_independently_under_one_homogeneous_rule() {
+        let product = TaggedPairRule::new(GrowingLine, TailCycle).unwrap();
+        let left = LogicalConfig::from([((0, 0), 1)]);
+        let right = LogicalConfig::from([((0, 6), 1)]);
+        let mut combined = LogicalConfig::new();
+        for (point, state) in &left {
+            combined.insert(*point, product.encode_left(*state).unwrap());
+        }
+        for (point, state) in &right {
+            combined.insert(*point, product.encode_right(*state).unwrap());
+        }
+        let next = product.step(&combined).unwrap();
+        let expected_left = product.left.step(&left).unwrap();
+        let expected_right = product.right.step(&right).unwrap();
+        let mut expected = LogicalConfig::new();
+        for (point, state) in expected_left {
+            expected.insert(point, product.encode_left(state).unwrap());
+        }
+        for (point, state) in expected_right {
+            expected.insert(point, product.encode_right(state).unwrap());
+        }
+        assert_eq!(next, expected);
+
+        let machine = BlockMachine::new(product).unwrap();
+        let binary = machine.codec.encode(&combined).unwrap();
+        assert_eq!(
+            machine
+                .codec
+                .decode(&machine.step_binary(&binary).unwrap())
+                .unwrap(),
+            next
+        );
     }
 
     #[test]
