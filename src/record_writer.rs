@@ -1,5 +1,8 @@
 use crate::construct::{LocalRule, LogicalConfig};
 use crate::conveyor::{GatedHeadRing, GatedHeadRule};
+use crate::firing_squad::{
+    FiringSquadRule, FIRE, FIRING_ERROR, FIRING_STATE_COUNT, GENERAL, SOLDIER,
+};
 use crate::prime_worker::{
     candidate_result_code, recycle_candidate_result, worker_candidate_bit, worker_candidate_value,
     worker_is_msb, worker_rule_state_count, PrimeWorker, RollingPrimeWorkerRule,
@@ -22,6 +25,12 @@ const RECORD_DONE_EMPTY: usize = 9;
 const RECORD_RESET: usize = 10;
 const RECORD_ACK: usize = 11;
 const RECORD_STATE_COUNT: usize = 12;
+const SLOT_PAD: usize = 1;
+const SLOT_ZERO: usize = 2;
+const SLOT_ONE: usize = 3;
+const SLOT_EMPTY: usize = 4;
+const SLOT_ACK: usize = 5;
+const SLOT_STATE_COUNT: usize = 6;
 
 pub struct CandidateRecordRule;
 
@@ -231,6 +240,59 @@ impl FamilyStationRule {
         }
     }
 
+    fn sync_offset() -> usize {
+        Self::head_offset() + GatedHeadRule.state_count() - 1
+    }
+
+    fn encode_sync(state: usize) -> usize {
+        Self::sync_offset() + state - 1
+    }
+
+    fn decode_sync(state: usize) -> Option<usize> {
+        let raw = state.checked_sub(Self::sync_offset())? + 1;
+        (raw <= FIRING_STATE_COUNT + 4).then_some(raw)
+    }
+
+    fn emit_zero() -> usize {
+        FIRING_STATE_COUNT
+    }
+
+    fn emit_one() -> usize {
+        FIRING_STATE_COUNT + 1
+    }
+
+    fn emit_empty() -> usize {
+        FIRING_STATE_COUNT + 2
+    }
+
+    fn sync_ack() -> usize {
+        FIRING_STATE_COUNT + 3
+    }
+
+    fn sync_held() -> usize {
+        FIRING_STATE_COUNT + 4
+    }
+
+    fn slot_offset() -> usize {
+        Self::sync_offset() + FIRING_STATE_COUNT + 4
+    }
+
+    fn encode_slot(state: usize) -> usize {
+        Self::slot_offset() + state - 1
+    }
+
+    fn decode_slot(state: usize) -> Option<usize> {
+        let raw = state.checked_sub(Self::slot_offset())? + 1;
+        (raw > 0 && raw < SLOT_STATE_COUNT).then_some(raw)
+    }
+
+    fn slot_ready(state: usize) -> bool {
+        matches!(
+            Self::decode_slot(state),
+            Some(SLOT_ZERO | SLOT_ONE | SLOT_EMPTY)
+        )
+    }
+
     fn record_done(state: usize) -> bool {
         matches!(
             CandidateRecordRule::decode(state),
@@ -241,15 +303,97 @@ impl FamilyStationRule {
 
 impl LocalRule for FamilyStationRule {
     fn state_count(&self) -> usize {
-        CandidateRecordRule.state_count() + GatedHeadRule.state_count() - 1
+        Self::slot_offset() + SLOT_STATE_COUNT - 1
     }
 
     fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        if let Some(slot) = Self::decode_slot(center) {
+            if Self::decode_head(neighbours[NORTH])
+                .map(GatedHeadRule::gate_is_acknowledged)
+                .unwrap_or(false)
+            {
+                return Self::encode_slot(SLOT_ACK);
+            }
+            if slot == SLOT_ACK {
+                return Self::encode_slot(SLOT_PAD);
+            }
+            let loaded = match Self::decode_sync(neighbours[SOUTH]) {
+                Some(state) if state == Self::emit_zero() => Some(SLOT_ZERO),
+                Some(state) if state == Self::emit_one() => Some(SLOT_ONE),
+                Some(state) if state == Self::emit_empty() => Some(SLOT_EMPTY),
+                _ => None,
+            };
+            if let Some(loaded) = loaded {
+                return Self::encode_slot(loaded);
+            }
+            return Self::encode_slot(Self::decode_slot(neighbours[WEST]).unwrap_or(SLOT_PAD));
+        }
+
+        if let Some(sync) = Self::decode_sync(center) {
+            if Self::decode_slot(neighbours[NORTH]) == Some(SLOT_ACK) {
+                return Self::encode_sync(Self::sync_ack());
+            }
+            if sync == Self::sync_ack() {
+                return Self::encode_sync(SOLDIER);
+            }
+            if sync == Self::sync_held() {
+                return center;
+            }
+            if sync == Self::emit_zero() || sync == Self::emit_one() {
+                return Self::encode_sync(SOLDIER);
+            }
+            if sync == Self::emit_empty() {
+                return Self::encode_sync(Self::sync_held());
+            }
+            if sync == FIRE {
+                let bit = CandidateRecordRule::decode(neighbours[SOUTH])
+                    .and_then(CandidateRecordRule::bit)
+                    .unwrap_or(false);
+                return Self::encode_sync(if bit {
+                    Self::emit_one()
+                } else {
+                    Self::emit_zero()
+                });
+            }
+            if sync == SOLDIER
+                && CandidateRecordRule::decode(neighbours[SOUTH]) == Some(RECORD_DONE_EMPTY)
+            {
+                return Self::encode_sync(Self::emit_empty());
+            }
+            if sync == SOLDIER
+                && CandidateRecordRule::decode(neighbours[SOUTH])
+                    .map(CandidateRecordRule::is_returning)
+                    .unwrap_or(false)
+                && Self::decode_sync(neighbours[EAST]).is_none()
+            {
+                return Self::encode_sync(GENERAL);
+            }
+            let mut local = [0; 8];
+            for slot in 0..8 {
+                local[slot] = Self::decode_sync(neighbours[slot])
+                    .map(|state| {
+                        if state >= FIRING_STATE_COUNT {
+                            SOLDIER
+                        } else {
+                            state
+                        }
+                    })
+                    .unwrap_or(0);
+            }
+            if sync == SOLDIER
+                && matches!(local[WEST], 0 | SOLDIER)
+                && matches!(local[EAST], 0 | SOLDIER)
+            {
+                return center;
+            }
+            return Self::encode_sync(FiringSquadRule.next(sync, local));
+        }
+
         if center >= Self::head_offset() {
             let raw = Self::decode_head(center).unwrap();
             if GatedHeadRule::gate_is_waiting(raw) {
                 if let Some(slot) = GatedHeadRule::gate_station_slot(raw) {
-                    if Self::record_done(neighbours[slot]) {
+                    if Self::slot_ready(neighbours[slot]) {
                         return Self::encode_head(GatedHeadRule::rearm_gate(raw).unwrap());
                     }
                 }
@@ -262,6 +406,11 @@ impl LocalRule for FamilyStationRule {
         }
 
         if center == 0 {
+            if CandidateRecordRule::decode(neighbours[SOUTH]).is_some()
+                && Self::decode_sync(neighbours[WEST]).is_some()
+            {
+                return Self::encode_sync(SOLDIER);
+            }
             let worker_states = worker_rule_state_count();
             if worker_candidate_bit(neighbours[SOUTH]).is_some()
                 && CandidateRecordRule::decode(neighbours[WEST]).is_some()
@@ -278,11 +427,7 @@ impl LocalRule for FamilyStationRule {
         }
 
         if let Some(record) = CandidateRecordRule::decode(center) {
-            let acknowledged = neighbours.iter().any(|state| {
-                Self::decode_head(*state)
-                    .map(GatedHeadRule::gate_is_acknowledged)
-                    .unwrap_or(false)
-            });
+            let acknowledged = Self::decode_sync(neighbours[NORTH]) == Some(Self::sync_ack());
             if Self::record_done(center) && acknowledged {
                 return CandidateRecordRule::encode(RECORD_ACK);
             }
@@ -336,8 +481,10 @@ pub struct RollingRecordedWorker {
 pub struct FamilyStation {
     pub config: LogicalConfig,
     pub steps: usize,
+    pub detached: Vec<Option<usize>>,
     candidate_origin: (i32, i32),
     initial_candidate: usize,
+    gate_point: (i32, i32),
 }
 
 pub struct PackedCandidateRecordRule {
@@ -547,7 +694,12 @@ impl CandidateRecordWriter {
 
 impl RollingRecordedWorker {
     pub fn new(candidate: usize) -> Result<Self, String> {
-        let worker = PrimeWorker::new(candidate)?;
+        let width = PrimeWorker::new(candidate)?.config.len();
+        Self::with_width(candidate, width)
+    }
+
+    pub fn with_width(candidate: usize, width: usize) -> Result<Self, String> {
+        let worker = PrimeWorker::with_width(candidate, width)?;
         let width = worker.config.len();
         let mut config = worker.config;
         for x in 0..width {
@@ -624,11 +776,17 @@ impl RollingRecordedWorker {
 
 impl FamilyStation {
     pub fn new(candidate: usize) -> Result<Self, String> {
+        let width = PrimeWorker::new(candidate)?.config.len();
+        Self::with_width(candidate, width)
+    }
+
+    pub fn with_width(candidate: usize, width: usize) -> Result<Self, String> {
         let mut ring = GatedHeadRing::new_with_stations(4, 4, &[0])?;
         ring.set_all_gates_waiting();
-        let (_, station) = ring.station_site(0)?;
-        let candidate_origin = (station.0, station.1 - 1);
-        let worker = RollingRecordedWorker::new(candidate)?;
+        let (gate_point, station) = ring.station_site(0)?;
+        let candidate_origin = (station.0, station.1 - 3);
+        let worker = RollingRecordedWorker::with_width(candidate, width)?;
+        let width = worker.config.keys().filter(|(_, y)| *y == 0).count();
         let mut config = LogicalConfig::new();
         for (point, state) in ring.config {
             config.insert(point, FamilyStationRule::encode_head(state));
@@ -639,17 +797,66 @@ impl FamilyStation {
                 return Err(format!("family station geometry overlaps at {:?}", point));
             }
         }
+        for x in 0..width {
+            config.insert(
+                (candidate_origin.0 + x as i32, candidate_origin.1 + 2),
+                FamilyStationRule::encode_sync(SOLDIER),
+            );
+        }
+        for x in 0..width + 128 {
+            config.insert(
+                (candidate_origin.0 + x as i32, candidate_origin.1 + 3),
+                FamilyStationRule::encode_slot(SLOT_PAD),
+            );
+        }
         Ok(FamilyStation {
             config,
             steps: 0,
+            detached: Vec::new(),
             candidate_origin,
             initial_candidate: candidate,
+            gate_point,
         })
     }
 
     pub fn step(&mut self) -> Result<(), String> {
+        let slot_origin = (self.candidate_origin.0, self.candidate_origin.1 + 3);
+        match self
+            .config
+            .get(&slot_origin)
+            .and_then(|state| FamilyStationRule::decode_slot(*state))
+        {
+            Some(SLOT_EMPTY) => self.detached.push(None),
+            Some(SLOT_ZERO | SLOT_ONE) => {
+                let mut value = 0usize;
+                for bit in 0..usize::BITS as usize {
+                    let Some(slot) = self
+                        .config
+                        .get(&(slot_origin.0 + bit as i32, slot_origin.1))
+                        .and_then(|state| FamilyStationRule::decode_slot(*state))
+                    else {
+                        break;
+                    };
+                    match slot {
+                        SLOT_ZERO => {}
+                        SLOT_ONE => value |= 1usize << bit,
+                        _ => break,
+                    }
+                }
+                self.detached.push(Some(value));
+            }
+            _ => {}
+        }
         self.config = FamilyStationRule.step(&self.config)?;
         self.steps += 1;
+        if let Some(point) = self.config.iter().find_map(|(point, state)| {
+            (FamilyStationRule::decode_sync(*state) == Some(FIRING_ERROR)).then_some(*point)
+        }) {
+            return Err(format!(
+                "family station synchronizer failed at {:?} on step {}",
+                point, self.steps
+            ));
+        }
         Ok(())
     }
 
@@ -696,10 +903,25 @@ impl FamilyStation {
         }
         if self.candidate() != Some(target) {
             return Err(format!(
-                "family station did not reach candidate {} in {} steps; current {:?}",
+                "family station did not reach candidate {} in {} steps; current {:?}, result {:?}, record {:?}, sync {:?}, slot {:?}, gate {:?}",
                 target,
                 max_steps,
-                self.candidate()
+                self.candidate(),
+                self.config
+                    .get(&self.candidate_origin)
+                    .and_then(|state| candidate_result_code(*state)),
+                self.config
+                    .get(&(self.candidate_origin.0, self.candidate_origin.1 + 1))
+                    .and_then(|state| CandidateRecordRule::decode(*state)),
+                self.config
+                    .get(&(self.candidate_origin.0, self.candidate_origin.1 + 2))
+                    .and_then(|state| FamilyStationRule::decode_sync(*state)),
+                self.config
+                    .get(&(self.candidate_origin.0, self.candidate_origin.1 + 3))
+                    .and_then(|state| FamilyStationRule::decode_slot(*state)),
+                self.config
+                    .get(&self.gate_point)
+                    .and_then(|state| FamilyStationRule::decode_head(*state))
             ));
         }
         Ok(())
@@ -903,9 +1125,15 @@ mod tests {
 
     #[test]
     fn gated_ring_acknowledges_record_before_worker_recycle() {
-        let mut station = FamilyStation::new(29).unwrap();
-        station.run_until_candidate(34, 2_000_000).unwrap();
+        let mut station = FamilyStation::with_width(29, 8).unwrap();
+        let active = station.config.len();
+        while station.candidate() != Some(34) {
+            station.step().unwrap();
+            assert_eq!(station.config.len(), active);
+            assert!(station.steps < 100_000);
+        }
         assert_eq!(station.candidate(), Some(34));
+        assert_eq!(station.detached, vec![Some(29), None, Some(31), None, None]);
     }
 
     #[test]

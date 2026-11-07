@@ -384,7 +384,10 @@ bits into queue chunks with local moving heads; a composite leaves a padding hol
 product rule performs classification, copy/backpressure, record reset, guard-bit growth and worker
 recycle without a host transition between candidates. A second product attaches that lane to a
 sparse-gated alternating ring: the completed record rearms its station, the head acknowledges it,
-and only then may the record reset and the worker advance. `src/gap_plan.rs`
+and only then may the record reset and the worker advance. A local firing-squad copy stage detaches
+the record into an already-active padding conveyor; prime words and composite-empty markers move
+away in candidate order while a fresh slot remains at the station. With the epoch's fixed worker
+width this complete cycle is population-neutral. `src/gap_plan.rs`
 then implements the exact weight-four arithmetic after consecutive prime records are subtracted:
 adding the current two-bit tail residue makes the low two sum bits the next residue and all higher
 bits the split count. The synchronized typed-output variant can assign every split child a concrete
@@ -416,7 +419,7 @@ until those tables and the induction are present.
 The remaining local construction is narrower than before but still essential:
 
 - build and recycle the dyadic ring geometry from ordinary reservoir blocks;
-- detach each acknowledged family record into its preassigned packed slot and compose subtraction,
+- pack detached family bit words into the preassigned 20-bit queue slots and compose subtraction,
   compacted rows and output decoders under the tagged epoch rule;
 - generate the next epoch's regular role/instruction geometry with the checked \(O(\log N)\)
   builder share;
