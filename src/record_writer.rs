@@ -8,6 +8,7 @@ use crate::prime_worker::{
     worker_is_msb, worker_rule_state_count, PrimeWorker, RollingPrimeWorkerRule,
 };
 
+const SOUTH_WEST: usize = 0;
 const SOUTH: usize = 1;
 const WEST: usize = 3;
 const EAST: usize = 4;
@@ -466,6 +467,154 @@ impl LocalRule for FamilyStationRule {
     }
 }
 
+pub struct MovingSlotPackerRule {
+    payload_bits: usize,
+    payload_states: usize,
+}
+
+impl MovingSlotPackerRule {
+    pub fn new(payload_bits: usize) -> Result<Self, String> {
+        if !(1..=20).contains(&payload_bits) {
+            return Err("moving slot packer width must be between 1 and 20".to_string());
+        }
+        Ok(MovingSlotPackerRule {
+            payload_bits,
+            payload_states: 1usize << payload_bits,
+        })
+    }
+
+    fn accumulator_offset(&self) -> usize {
+        FamilyStationRule.state_count()
+    }
+
+    fn idle(&self) -> usize {
+        self.accumulator_offset()
+    }
+
+    fn accumulator_base(&self) -> usize {
+        self.idle() + 1
+    }
+
+    fn accumulator(&self, count: usize, payload: usize) -> Result<usize, String> {
+        if count == 0 || count >= self.payload_bits || payload >= self.payload_states {
+            return Err("invalid moving slot accumulator".to_string());
+        }
+        Ok(self.accumulator_base() + (count - 1) * self.payload_states + payload)
+    }
+
+    fn decode_accumulator(&self, state: usize) -> Option<(usize, usize)> {
+        let raw = state.checked_sub(self.accumulator_base())?;
+        let states = (self.payload_bits - 1) * self.payload_states;
+        if raw >= states {
+            return None;
+        }
+        Some((raw / self.payload_states + 1, raw % self.payload_states))
+    }
+
+    fn output_offset(&self) -> usize {
+        self.accumulator_base() + (self.payload_bits - 1) * self.payload_states
+    }
+
+    fn output_pad(&self) -> usize {
+        self.output_offset()
+    }
+
+    fn output_empty(&self) -> usize {
+        self.output_offset() + 1
+    }
+
+    fn output_chunk(&self, payload: usize) -> Result<usize, String> {
+        if payload >= self.payload_states {
+            return Err("moving slot output payload is too large".to_string());
+        }
+        Ok(self.output_offset() + 2 + payload)
+    }
+
+    fn decode_output(&self, state: usize) -> Option<Option<usize>> {
+        if state == self.output_pad() {
+            return Some(None);
+        }
+        if state == self.output_empty() {
+            return Some(Some(self.payload_states));
+        }
+        let payload = state.checked_sub(self.output_offset() + 2)?;
+        (payload < self.payload_states).then_some(Some(payload))
+    }
+
+    fn input_bit(state: usize) -> Option<bool> {
+        match FamilyStationRule::decode_slot(state)? {
+            SLOT_ZERO => Some(false),
+            SLOT_ONE => Some(true),
+            _ => None,
+        }
+    }
+}
+
+impl LocalRule for MovingSlotPackerRule {
+    fn state_count(&self) -> usize {
+        self.output_offset() + 2 + self.payload_states
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        if center < self.accumulator_offset() {
+            let mut local = [0; 8];
+            for slot in 0..8 {
+                if neighbours[slot] < self.accumulator_offset() {
+                    local[slot] = neighbours[slot];
+                }
+            }
+            return FamilyStationRule.next(center, local);
+        }
+
+        if center == self.idle() || self.decode_accumulator(center).is_some() {
+            let Some(bit) = Self::input_bit(neighbours[SOUTH]) else {
+                return self.idle();
+            };
+            if self.payload_bits == 1 {
+                return self.idle();
+            }
+            let (count, payload) = self.decode_accumulator(center).unwrap_or((0, 0));
+            let count = count + 1;
+            let payload = (payload << 1) | bit as usize;
+            return if count == self.payload_bits {
+                self.idle()
+            } else {
+                self.accumulator(count, payload).unwrap()
+            };
+        }
+
+        if self.decode_output(center).is_some() {
+            let input = FamilyStationRule::decode_slot(neighbours[SOUTH_WEST]);
+            if input == Some(SLOT_EMPTY) {
+                return self.output_empty();
+            }
+            if let Some(bit) = Self::input_bit(neighbours[SOUTH_WEST]) {
+                let complete = if self.payload_bits == 1 {
+                    Some(bit as usize)
+                } else {
+                    self.decode_accumulator(neighbours[WEST])
+                        .and_then(|(count, payload)| {
+                            (count + 1 == self.payload_bits)
+                                .then_some((payload << 1) | bit as usize)
+                        })
+                };
+                if let Some(payload) = complete {
+                    return self.output_chunk(payload).unwrap();
+                }
+            }
+            return self
+                .decode_output(neighbours[WEST])
+                .map(|payload| match payload {
+                    None => self.output_pad(),
+                    Some(payload) if payload == self.payload_states => self.output_empty(),
+                    Some(payload) => self.output_chunk(payload).unwrap(),
+                })
+                .unwrap_or_else(|| self.output_pad());
+        }
+        0
+    }
+}
+
 pub struct CandidateRecordWriter {
     pub config: LogicalConfig,
     pub steps: usize,
@@ -485,6 +634,14 @@ pub struct FamilyStation {
     candidate_origin: (i32, i32),
     initial_candidate: usize,
     gate_point: (i32, i32),
+}
+
+pub struct MovingSlotPacker {
+    pub config: LogicalConfig,
+    pub steps: usize,
+    pub emitted: Vec<Option<usize>>,
+    rule: MovingSlotPackerRule,
+    output_end: (i32, i32),
 }
 
 pub struct PackedCandidateRecordRule {
@@ -928,6 +1085,105 @@ impl FamilyStation {
     }
 }
 
+impl MovingSlotPacker {
+    pub fn new(
+        records: &[Option<usize>],
+        width: usize,
+        payload_bits: usize,
+    ) -> Result<Self, String> {
+        if width == 0 || width > usize::BITS as usize || width % payload_bits != 0 {
+            return Err(
+                "moving slot packer needs a positive word width divisible by its payload width"
+                    .to_string(),
+            );
+        }
+        let rule = MovingSlotPackerRule::new(payload_bits)?;
+        let station_x = i32::try_from(
+            records
+                .len()
+                .checked_mul(width + 2)
+                .and_then(|value| value.checked_add(8))
+                .ok_or_else(|| "moving slot input is too wide".to_string())?,
+        )
+        .map_err(|_| "moving slot station does not fit i32".to_string())?;
+        let mut config = LogicalConfig::new();
+        for x in 0..=station_x {
+            config.insert((x, 0), FamilyStationRule::encode_slot(SLOT_PAD));
+        }
+        let mut cursor = station_x - 1;
+        for record in records {
+            match record {
+                Some(value) => {
+                    if width < usize::BITS as usize && *value >= 1usize << width {
+                        return Err("moving slot record does not fit its word width".to_string());
+                    }
+                    let start = cursor - width as i32 + 1;
+                    if start < 0 {
+                        return Err("moving slot input geometry is too short".to_string());
+                    }
+                    for bit in 0..width {
+                        config.insert(
+                            (start + bit as i32, 0),
+                            FamilyStationRule::encode_slot(if value & (1usize << bit) != 0 {
+                                SLOT_ONE
+                            } else {
+                                SLOT_ZERO
+                            }),
+                        );
+                    }
+                    cursor = start - 2;
+                }
+                None => {
+                    config.insert((cursor, 0), FamilyStationRule::encode_slot(SLOT_EMPTY));
+                    cursor -= 2;
+                }
+            }
+        }
+        config.insert((station_x, 1), rule.idle());
+        let output_length = 256i32;
+        for x in station_x + 1..=station_x + output_length {
+            config.insert((x, 1), rule.output_pad());
+        }
+        Ok(MovingSlotPacker {
+            config,
+            steps: 0,
+            emitted: Vec::new(),
+            rule,
+            output_end: (station_x + output_length, 1),
+        })
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        if let Some(output) = self
+            .config
+            .get(&self.output_end)
+            .and_then(|state| self.rule.decode_output(*state))
+            .flatten()
+        {
+            self.emitted
+                .push((output != self.rule.payload_states).then_some(output));
+        }
+        self.config = self.rule.step(&self.config)?;
+        self.steps += 1;
+        Ok(())
+    }
+
+    pub fn run_until_emitted(&mut self, count: usize, max_steps: usize) -> Result<(), String> {
+        while self.emitted.len() < count && self.steps < max_steps {
+            self.step()?;
+        }
+        if self.emitted.len() != count {
+            return Err(format!(
+                "moving slot packer emitted {} of {} chunks in {} steps",
+                self.emitted.len(),
+                count,
+                max_steps
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PackedCandidateRecordWriter {
     pub fn new(candidate: usize, prime: bool, payload_bits: usize) -> Result<Self, String> {
         let rule = PackedCandidateRecordRule::new(payload_bits)?;
@@ -1145,6 +1401,31 @@ mod tests {
         assert_eq!(
             machine.codec.decode(&next).unwrap(),
             machine.rule.step(&station.config).unwrap()
+        );
+        assert_eq!(binary.len(), next.len());
+    }
+
+    #[test]
+    fn moving_slot_words_pack_into_queue_chunks_in_order() {
+        let mut packer = MovingSlotPacker::new(&[Some(29), None, Some(31)], 8, 4).unwrap();
+        let active = packer.config.len();
+        packer.run_until_emitted(5, 2_000).unwrap();
+        assert_eq!(packer.config.len(), active);
+        assert_eq!(
+            packer.emitted,
+            vec![Some(1), Some(13), None, Some(1), Some(15)]
+        );
+    }
+
+    #[test]
+    fn moving_slot_packer_compiles_to_binary_blocks() {
+        let packer = MovingSlotPacker::new(&[Some(29)], 8, 4).unwrap();
+        let machine = BlockMachine::new(MovingSlotPackerRule::new(4).unwrap()).unwrap();
+        let binary = machine.codec.encode(&packer.config).unwrap();
+        let next = machine.step_binary(&binary).unwrap();
+        assert_eq!(
+            machine.codec.decode(&next).unwrap(),
+            machine.rule.step(&packer.config).unwrap()
         );
         assert_eq!(binary.len(), next.len());
     }

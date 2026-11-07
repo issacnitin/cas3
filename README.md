@@ -387,7 +387,9 @@ sparse-gated alternating ring: the completed record rearms its station, the head
 and only then may the record reset and the worker advance. A local firing-squad copy stage detaches
 the record into an already-active padding conveyor; prime words and composite-empty markers move
 away in candidate order while a fresh slot remains at the station. With the epoch's fixed worker
-width this complete cycle is population-neutral. `src/gap_plan.rs`
+width this complete cycle is population-neutral. A stationary finite accumulator samples those
+moving words most-significant bit first and emits the same fixed-width chunk states used by the
+packed queue, preserving composite holes. `src/gap_plan.rs`
 then implements the exact weight-four arithmetic after consecutive prime records are subtracted:
 adding the current two-bit tail residue makes the low two sum bits the next residue and all higher
 bits the split count. The synchronized typed-output variant can assign every split child a concrete
@@ -419,8 +421,8 @@ until those tables and the induction are present.
 The remaining local construction is narrower than before but still essential:
 
 - build and recycle the dyadic ring geometry from ordinary reservoir blocks;
-- pack detached family bit words into the preassigned 20-bit queue slots and compose subtraction,
-  compacted rows and output decoders under the tagged epoch rule;
+- compose packed station chunks, record-pair subtraction, compacted rows and output decoders under
+  the tagged epoch rule;
 - generate the next epoch's regular role/instruction geometry with the checked \(O(\log N)\)
   builder share;
 - prove arena ownership and reserved child vacancies at every output transition;
