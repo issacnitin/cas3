@@ -554,6 +554,175 @@ impl LocalRule for SynchronizedPrimeOutputRule {
     }
 }
 
+pub struct SynchronizedTypedOutputRule {
+    roles: usize,
+    reservoir_role: usize,
+    idle_base: usize,
+    dormant_base: usize,
+    active_base: usize,
+    sentinel_dormant: usize,
+    sentinel_active: usize,
+    request_base: usize,
+    tail_base: usize,
+}
+
+impl SynchronizedTypedOutputRule {
+    pub fn new(roles: usize, reservoir_role: usize) -> Result<Self, String> {
+        if roles == 0 || reservoir_role >= roles {
+            return Err("typed output needs a valid nonempty role alphabet".to_string());
+        }
+        let idle_base = SynchronizedMaskRule.state_count();
+        let dormant_base = idle_base + roles;
+        let pairs = roles
+            .checked_mul(roles)
+            .ok_or_else(|| "typed output role alphabet is too large".to_string())?;
+        let active_base = dormant_base
+            .checked_add(pairs)
+            .ok_or_else(|| "typed output alphabet is too large".to_string())?;
+        let sentinel_dormant = active_base
+            .checked_add(pairs)
+            .ok_or_else(|| "typed output alphabet is too large".to_string())?;
+        let sentinel_active = sentinel_dormant + 1;
+        let request_base = sentinel_active + 1;
+        let tail_base = request_base + 4;
+        tail_base
+            .checked_add(4)
+            .ok_or_else(|| "typed output alphabet is too large".to_string())?;
+        Ok(SynchronizedTypedOutputRule {
+            roles,
+            reservoir_role,
+            idle_base,
+            dormant_base,
+            active_base,
+            sentinel_dormant,
+            sentinel_active,
+            request_base,
+            tail_base,
+        })
+    }
+
+    pub fn ordinary_state_count(&self) -> usize {
+        self.tail_base
+    }
+
+    pub fn idle(&self, role: usize) -> Result<usize, String> {
+        if role >= self.roles {
+            return Err("typed output idle role is outside its alphabet".to_string());
+        }
+        Ok(self.idle_base + role)
+    }
+
+    pub fn dormant(&self, parent: usize, child: usize) -> Result<usize, String> {
+        if parent >= self.roles || child >= self.roles {
+            return Err("typed output instruction role is outside its alphabet".to_string());
+        }
+        Ok(self.dormant_base + parent * self.roles + child)
+    }
+
+    pub fn request(&self, residue: usize) -> Result<usize, String> {
+        if residue >= 4 {
+            return Err("typed output residue request is outside the range".to_string());
+        }
+        Ok(self.request_base + residue)
+    }
+
+    pub fn tail(&self, residue: usize) -> Result<usize, String> {
+        if residue >= 4 {
+            return Err("typed output tail residue is outside the range".to_string());
+        }
+        Ok(self.tail_base + residue)
+    }
+
+    fn pair(&self, state: usize, base: usize) -> Option<(usize, usize)> {
+        let raw = state.checked_sub(base)?;
+        (raw < self.roles * self.roles).then_some((raw / self.roles, raw % self.roles))
+    }
+
+    fn request_residue(&self, state: usize) -> Option<usize> {
+        (self.request_base..self.tail_base)
+            .contains(&state)
+            .then_some(state - self.request_base)
+    }
+
+    fn tail_residue(&self, state: usize) -> Option<usize> {
+        (self.tail_base..self.tail_base + 4)
+            .contains(&state)
+            .then_some(state - self.tail_base)
+    }
+}
+
+impl LocalRule for SynchronizedTypedOutputRule {
+    fn state_count(&self) -> usize {
+        self.tail_base + 4
+    }
+
+    fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
+        if center == 0 {
+            if let Some((_, child)) = self.pair(neighbours[NORTH], self.active_base) {
+                return self.idle(child).unwrap();
+            }
+            let mut local = [0; 8];
+            for slot in 0..8 {
+                if neighbours[slot] < self.idle_base {
+                    local[slot] = neighbours[slot];
+                }
+            }
+            return SynchronizedMaskRule.next(0, local);
+        }
+        if center < self.idle_base {
+            if SynchronizedMaskRule::decode_firing(center) == Some(FIRE) {
+                return MASK_AVAILABLE;
+            }
+            let mut local = [0; 8];
+            for slot in 0..8 {
+                if neighbours[slot] < self.idle_base {
+                    local[slot] = neighbours[slot];
+                }
+            }
+            return SynchronizedMaskRule.next(center, local);
+        }
+        if (self.idle_base..self.dormant_base).contains(&center) {
+            return center;
+        }
+        if let Some((parent, child)) = self.pair(center, self.dormant_base) {
+            return if SynchronizedMaskRule::decode_firing(neighbours[NORTH]) == Some(FIRE) {
+                self.active_base + parent * self.roles + child
+            } else {
+                center
+            };
+        }
+        if let Some((parent, _)) = self.pair(center, self.active_base) {
+            return self.idle(parent).unwrap();
+        }
+        if center == self.sentinel_dormant {
+            return if SynchronizedMaskRule::decode_firing(neighbours[NORTH]) == Some(FIRE) {
+                self.sentinel_active
+            } else {
+                center
+            };
+        }
+        if center == self.sentinel_active {
+            return self.idle(self.reservoir_role).unwrap();
+        }
+        if self.request_residue(center).is_some() {
+            return if neighbours[NORTH_EAST] == self.sentinel_active {
+                self.idle(self.reservoir_role).unwrap()
+            } else {
+                center
+            };
+        }
+        if let Some(current) = self.tail_residue(center) {
+            if neighbours[EAST] == self.sentinel_active {
+                if let Some(requested) = self.request_residue(neighbours[SOUTH]) {
+                    return self.tail_base + requested;
+                }
+            }
+            return self.tail_base + current;
+        }
+        0
+    }
+}
+
 pub struct PackedPrimeOutputRule {
     payload_states: usize,
     output: SynchronizedPrimeOutputRule,
@@ -707,6 +876,12 @@ pub struct PackedPrimeOutput {
     pub config: LogicalConfig,
     pub steps: usize,
     rule: PackedPrimeOutputRule,
+}
+
+pub struct SynchronizedTypedOutput {
+    pub config: LogicalConfig,
+    pub steps: usize,
+    rule: SynchronizedTypedOutputRule,
 }
 
 impl SplitMaskWriter {
@@ -1060,6 +1235,81 @@ impl PackedPrimeOutput {
     }
 }
 
+impl SynchronizedTypedOutput {
+    pub fn new(
+        splits: usize,
+        width: usize,
+        capacity: usize,
+        old_residue: usize,
+        new_residue: usize,
+        roles: usize,
+        reservoir_role: usize,
+        child_roles: &[usize],
+    ) -> Result<Self, String> {
+        if child_roles.len() > capacity {
+            return Err("typed output has more child roles than frontier parents".to_string());
+        }
+        let rule = SynchronizedTypedOutputRule::new(roles, reservoir_role)?;
+        let mut config = SplitMaskWriter::from_record(splits, width, capacity)?.config;
+        config.insert((-1, -1), SynchronizedMaskRule::encode_firing(SOLDIER));
+        config.insert((-1, -2), rule.sentinel_dormant);
+        config.insert((-2, -2), rule.tail(old_residue)?);
+        config.insert((-2, -3), rule.request(new_residue)?);
+        for x in 0..capacity {
+            config.insert(
+                (x as i32, -2),
+                rule.dormant(
+                    reservoir_role,
+                    child_roles.get(x).copied().unwrap_or(reservoir_role),
+                )?,
+            );
+        }
+        Ok(SynchronizedTypedOutput {
+            config,
+            steps: 0,
+            rule,
+        })
+    }
+
+    pub fn ready(&self) -> bool {
+        self.config
+            .values()
+            .any(|state| SynchronizedMaskRule::decode_firing(*state) == Some(FIRE))
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        self.config = self.rule.step(&self.config)?;
+        self.steps += 1;
+        Ok(())
+    }
+
+    pub fn run_until_ready(&mut self, max_steps: usize) -> Result<(), String> {
+        while !self.ready() && self.steps < max_steps {
+            self.step()?;
+        }
+        if !self.ready() {
+            return Err(format!(
+                "typed synchronized output did not become ready in {} steps",
+                max_steps
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn binary_weight(&self) -> Result<usize, String> {
+        let codec = BlockCodec::with_tail_states(self.rule.ordinary_state_count(), 4)?;
+        codec.logical_weight(&self.config)
+    }
+
+    pub fn commit(&mut self) -> Result<(), String> {
+        if !self.ready() {
+            return Err("typed synchronized output is not ready to commit".to_string());
+        }
+        self.step()?;
+        self.step()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1298,6 +1548,33 @@ mod tests {
             );
             queue.shift().unwrap();
         }
+    }
+
+    #[test]
+    fn synchronized_mask_spends_births_on_typed_scheduler_children() {
+        let splits = 7usize;
+        let child_roles = [1, 2, 3, 1, 2, 3, 1, 0, 0, 0];
+        let mut output =
+            SynchronizedTypedOutput::new(splits, 8, 10, 1, 3, 4, 0, &child_roles).unwrap();
+        let before = output.binary_weight().unwrap();
+        output.run_until_ready(20_000).unwrap();
+        assert_eq!(output.binary_weight().unwrap(), before);
+        output.commit().unwrap();
+        assert_eq!(
+            output.binary_weight().unwrap() as isize - before as isize,
+            (4 * splits + 2) as isize
+        );
+        for x in 0..splits {
+            assert_eq!(
+                output.config.get(&(x as i32, -3)),
+                Some(&output.rule.idle(child_roles[x]).unwrap())
+            );
+        }
+        assert!(!output.config.contains_key(&(-1, -3)));
+        assert_eq!(
+            output.config.get(&(-2, -2)),
+            Some(&output.rule.tail(3).unwrap())
+        );
     }
 
     #[test]

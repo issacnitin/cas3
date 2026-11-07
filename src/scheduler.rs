@@ -273,6 +273,7 @@ pub struct PrimeEpochPlan {
     pub mask_lead_fraction: f64,
     pub queue_latency: f64,
     pub queue_lead_fraction: f64,
+    pub builder_blocks_per_generation: f64,
 }
 
 impl PrimeEpochPlan {
@@ -317,6 +318,9 @@ impl PrimeEpochPlan {
         let queue_row_height = packed_chunks * PrimeEpochPlan::PACKED_GAP_BITS + 1.0;
         let queue_latency = queue_side * (1.0 + queue_row_height);
         let queue_lead_fraction = queue_latency / output_generations;
+        let next_scheduler_live = scheduler_live_estimate(power + 1)?;
+        let builder_blocks_per_generation =
+            ((next_scheduler_live - scheduler_live_cells) / 4.0) / output_generations;
 
         Ok(PrimeEpochPlan {
             power,
@@ -335,6 +339,7 @@ impl PrimeEpochPlan {
             mask_lead_fraction,
             queue_latency,
             queue_lead_fraction,
+            builder_blocks_per_generation,
         })
     }
 
@@ -345,6 +350,7 @@ impl PrimeEpochPlan {
             && self.maximum_gap_fraction < 0.5
             && self.mask_lead_fraction < 0.25
             && self.queue_lead_fraction < 0.01
+            && self.builder_blocks_per_generation <= 8.0
             && self
                 .next_epoch_build_fraction()
                 .map(|fraction| fraction <= 0.5)
@@ -379,6 +385,26 @@ impl PrimeEpochPlan {
             })
             .ok_or_else(|| "no certified dyadic epoch fits the checked range".to_string())
     }
+}
+
+fn scheduler_live_estimate(power: u32) -> Result<f64, String> {
+    if !(10..=513).contains(&power) {
+        return Err("scheduler estimate power is outside the checked range".to_string());
+    }
+    let lower = 2f64.powi(power as i32);
+    let logarithm = lower.ln();
+    let lanes = (4.0 * logarithm).ceil();
+    let width = f64::from(power + 4);
+    let worker_latency = 100.0 * (2.0 * lower.sqrt() + 1.0) * (width * width + width + 1.0);
+    let ring_families = (worker_latency + 8.0 * lanes + 4.0 * width).ceil();
+    let family_blocks = lanes * (4.0 * width + 16.0);
+    let ring_blocks = 4.0 * ring_families * family_blocks;
+    let four_n = 4.0 * lower;
+    let upper_records = dusart_upper_pi(four_n);
+    let average_gap = 2.0 * lower / upper_records.max(1.0);
+    let gap_bits = upper_records * ((average_gap + 1.0).log2() + 2.0);
+    let gap_buffer_blocks = 2.0 * gap_bits / PrimeEpochPlan::PACKED_GAP_BITS;
+    Ok(4.0 * (ring_blocks + gap_buffer_blocks))
 }
 
 fn dusart_lower_pi(x: f64) -> f64 {
@@ -2000,6 +2026,7 @@ mod tests {
         assert!(plan.maximum_gap_fraction < 0.00002);
         assert!(plan.mask_lead_fraction < 0.095);
         assert!(plan.queue_lead_fraction < 0.0000000002);
+        assert!(plan.builder_blocks_per_generation < 4.7);
         assert!(plan.next_epoch_build_fraction().unwrap() < 0.32);
         assert!(plan.next_epoch_reserve_fraction().unwrap() > 0.61);
         assert_eq!(plan.lanes, 239);

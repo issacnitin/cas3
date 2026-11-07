@@ -1188,6 +1188,16 @@ pub fn worker_candidate_value_at(config: &LogicalConfig, row: i32) -> Option<usi
     (occupied != 0).then_some(value)
 }
 
+pub fn worker_candidate_bit(state: usize) -> Option<bool> {
+    WorkerCell::decode(state).map(|cell| cell.n)
+}
+
+pub fn worker_is_msb(state: usize) -> bool {
+    WorkerCell::decode(state)
+        .map(|cell| cell.msb)
+        .unwrap_or(false)
+}
+
 pub struct ParallelCandidateField {
     pub config: LogicalConfig,
     pub steps: usize,

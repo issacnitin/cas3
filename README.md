@@ -334,7 +334,8 @@ is \(N=2^{86}\):
 - complete next-ring construction cost below \(0.312N\);
 - next-epoch ordinary/output reserve above \(0.617N\);
 - explicit maximum prime gap below \(0.00001126N\);
-- worst-case local gap-to-mask decoding below \(0.095\) of one epoch.
+- worst-case local gap-to-mask decoding below \(0.095\) of one epoch;
+- next-ring construction rate below 4.7 ordinary blocks per generation (eight heads suffice).
 
 The last number uses Dusart's theorem that
 \([x,x+x/(25\ln^2x)]\) contains a prime for \(x\ge396738\). Thus the asymptotic schedule has both
@@ -363,6 +364,14 @@ between them. `src/conveyor.rs` provides population-neutral cyclic transport for
 payload order is preserved around a finite local rectangle, and parallel copies carry every chunk
 of a record column.
 
+`src/record_writer.rs` supplies the family-side format conversion. A prime result freezes its
+distributed candidate tape, copies the bits into an active record row, and packs fixed groups of
+bits into queue chunks with local moving heads; a composite leaves a padding hole. `src/gap_plan.rs`
+then implements the exact weight-four arithmetic after consecutive prime records are subtracted:
+adding the current two-bit tail residue makes the low two sum bits the next residue and all higher
+bits the split count. The synchronized typed-output variant can assign every split child a concrete
+worker, wire, queue, or reservoir role while retaining the same \(4k+\Delta r\) population change.
+
 The older launch estimate is still useful for the compact one-shot mesh alternative:
 
 \[
@@ -389,8 +398,10 @@ until those tables and the induction are present.
 The remaining local construction is narrower than before but still essential:
 
 - build and recycle the dyadic ring geometry from ordinary reservoir blocks;
-- write completed family segments into their preassigned packed queue slots;
-- route compacted rows into one-shot split/tail decoders at the certified lead;
+- compose family record writers, gated slot stations, subtraction and compacted rows under one
+  tagged rule;
+- generate the next epoch's regular role/instruction geometry with the certified eight builder
+  heads;
 - prove arena ownership and reserved child vacancies at every output transition;
 - compile the finite bootstrap to the complete legal epoch configuration.
 

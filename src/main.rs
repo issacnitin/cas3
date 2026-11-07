@@ -17,9 +17,11 @@ mod construct;
 mod bootstrap;
 mod conveyor;
 mod firing_squad;
+mod gap_plan;
 mod mask_writer;
 mod packed_queue;
 mod prime_worker;
+mod record_writer;
 mod scheduler;
 mod cli;
 

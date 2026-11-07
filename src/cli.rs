@@ -929,6 +929,10 @@ fn run_epoch(opts: &Options) -> Result<(), String> {
     println!("  queue latency bound  : {:.3e}", plan.queue_latency);
     println!("  queue lead / epoch   : {:.12}", plan.queue_lead_fraction);
     println!(
+        "  builder blocks / gen : {:.6}",
+        plan.builder_blocks_per_generation
+    );
+    println!(
         "  next-ring births / N : {:.6}",
         plan.next_epoch_build_fraction()?
     );
