@@ -13,7 +13,10 @@ const GATE_WEST: usize = 4;
 const GATE_ROLE_COUNT: usize = 5;
 const HEAD_TRACK_STATES: usize = ROLE_COUNT * GATE_ROLE_COUNT * 3;
 const HEAD_GATE_BASE: usize = 1 + HEAD_TRACK_STATES;
-const HEAD_GATE_STATES: usize = ROLE_COUNT * 2;
+const HEAD_GATE_STATES: usize = ROLE_COUNT * 3;
+const GATE_WAITING: usize = 0;
+const GATE_READY: usize = 1;
+const GATE_ACKNOWLEDGED: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pull {
@@ -154,23 +157,40 @@ impl GatedHeadRule {
         })
     }
 
-    fn encode_gate(track_direction: usize, ready: bool) -> usize {
-        HEAD_GATE_BASE + (track_direction - 1) * 2 + ready as usize
+    fn encode_gate(track_direction: usize, phase: usize) -> usize {
+        HEAD_GATE_BASE + (track_direction - 1) * 3 + phase
     }
 
-    fn decode_gate(state: usize) -> Option<(usize, bool)> {
+    fn decode_gate(state: usize) -> Option<(usize, usize)> {
         let raw = state.checked_sub(HEAD_GATE_BASE)?;
         if raw >= HEAD_GATE_STATES {
             return None;
         }
-        Some((raw / 2 + 1, raw & 1 != 0))
+        Some((raw / 3 + 1, raw % 3))
+    }
+
+    pub(crate) fn gate_is_waiting(state: usize) -> bool {
+        Self::decode_gate(state)
+            .map(|(_, phase)| phase == GATE_WAITING)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn gate_is_acknowledged(state: usize) -> bool {
+        Self::decode_gate(state)
+            .map(|(_, phase)| phase == GATE_ACKNOWLEDGED)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn rearm_gate(state: usize) -> Option<usize> {
+        let (direction, phase) = Self::decode_gate(state)?;
+        (phase == GATE_WAITING).then(|| Self::encode_gate(direction, GATE_READY))
     }
 
     fn gate_ready(track: HeadTrack, neighbours: [usize; 8]) -> bool {
         track.gate == GATE_NONE
             || Pull::direction_slot(track.gate)
                 .and_then(|slot| Self::decode_gate(neighbours[slot]))
-                .map(|(_, ready)| ready)
+                .map(|(_, phase)| phase == GATE_READY)
                 .unwrap_or(false)
     }
 
@@ -198,16 +218,19 @@ impl LocalRule for GatedHeadRule {
     }
 
     fn next(&self, center: usize, neighbours: [usize; 8]) -> usize {
-        if let Some((track_direction, ready)) = Self::decode_gate(center) {
-            if !ready {
+        if let Some((track_direction, phase)) = Self::decode_gate(center) {
+            if phase == GATE_WAITING {
                 return center;
+            }
+            if phase == GATE_ACKNOWLEDGED {
+                return Self::encode_gate(track_direction, GATE_WAITING);
             }
             let track_slot = Pull::direction_slot(track_direction).unwrap();
             return if Self::decode_track(neighbours[track_slot])
                 .map(|track| track.phase == 2)
                 .unwrap_or(false)
             {
-                Self::encode_gate(track_direction, false)
+                Self::encode_gate(track_direction, GATE_ACKNOWLEDGED)
             } else {
                 center
             };
@@ -240,7 +263,7 @@ impl LocalRule for GatedHeadRule {
             } else {
                 Self::predecessor_gate_slot(predecessor_slot, predecessor.gate)
                     .and_then(|slot| Self::decode_gate(neighbours[slot]))
-                    .map(|(_, ready)| ready)
+                    .map(|(_, phase)| phase == GATE_READY)
                     .unwrap_or(false)
             };
             if ready {
@@ -307,7 +330,7 @@ impl GatedHeadRing {
                             GATE_WEST => GATE_EAST,
                             _ => unreachable!(),
                         },
-                        true,
+                        GATE_READY,
                     ),
                 )
                 .is_some()
