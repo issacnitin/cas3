@@ -65,6 +65,9 @@ pub struct SearchParams {
     /// Seed cell offsets; empty means the single cell at the origin. target[0] = number of cells.
     pub seed: Vec<Vec<i32>>,
     pub class: RuleClass,
+    /// Isotropy group of the lattice as integer matrices (empty: signed permutations), e.g. the
+    /// 12 symmetries of the hexagonal lattice.
+    pub symmetry_matrices: Vec<Vec<Vec<i32>>>,
     pub survival: SurvivalMode,
     pub symmetry: bool,
     pub find_first: bool,
@@ -85,6 +88,7 @@ impl SearchParams {
             target,
             seed: vec![],
             class: RuleClass::Table,
+            symmetry_matrices: vec![],
             survival: SurvivalMode::Free,
             symmetry: true,
             find_first: false,
@@ -287,7 +291,7 @@ impl Ctx {
         let seed_extent = seed.iter().flatten().map(|x| x.abs()).max().unwrap_or(0);
         let extent = seed_extent + nb.radius() * (target.len() as i32 + 1) + 1;
         let lattice = Lattice::new(nb.dim, extent)?;
-        let classifier = Arc::new(Classifier::new(params.class, nb)?);
+        let classifier = Arc::new(Classifier::with_symmetries(params.class, nb, &params.symmetry_matrices)?);
         // Rules of a symmetric class are invariant under the group, so symmetry cannot merge them.
         let group = if params.symmetry && params.class == RuleClass::Table {
             SymmetryGroup::preserving(nb)
@@ -1305,7 +1309,18 @@ mod test {
     }
 
     fn class_brute_force(nb: &Neighbourhood, class: RuleClass, seed: &[Vec<i32>], target: &[usize], mode: SurvivalMode) -> u128 {
-        let classifier = Classifier::new(class, nb).unwrap();
+        class_brute_force_with(nb, class, &[], seed, target, mode)
+    }
+
+    fn class_brute_force_with(
+        nb: &Neighbourhood,
+        class: RuleClass,
+        matrices: &[Vec<Vec<i32>>],
+        seed: &[Vec<i32>],
+        target: &[usize],
+        mode: SurvivalMode,
+    ) -> u128 {
+        let classifier = Classifier::with_symmetries(class, nb, matrices).unwrap();
         let k = nb.len();
         let mut birth_keys: Vec<u64> = (1..1u64 << k).map(|m| classifier.key(m)).collect();
         birth_keys.sort_unstable();
@@ -1399,6 +1414,33 @@ mod test {
     }
 
     #[test]
+    fn hexagonal_isotropic_rules_exact_against_brute_force() {
+        let hex = Neighbourhood::hexagonal();
+        let matrices = crate::lattice::hexagonal_symmetries();
+        let seeds = vec![vec![vec![0, 0]], vec![vec![-1, 0], vec![1, 0]], vec![vec![0, 0], vec![1, 0]], vec![vec![-1, 1], vec![1, -1]]];
+        for seed in &seeds {
+            for continuation in [vec![3, 5, 7], vec![7, 13], vec![4, 6, 8], vec![1, 1], vec![2, 3, 5, 7]] {
+                let target: Vec<usize> = std::iter::once(seed.len()).chain(continuation).collect();
+                for mode in [SurvivalMode::Always, SurvivalMode::Never] {
+                    let expected = class_brute_force_with(&hex, RuleClass::Isotropic, &matrices, seed, &target, mode);
+                    let mut params = SearchParams::new(hex.clone(), target.clone());
+                    params.seed = seed.clone();
+                    params.class = RuleClass::Isotropic;
+                    params.symmetry_matrices = matrices.clone();
+                    params.survival = mode;
+                    params.parallel = false;
+                    params.store_limit = 2;
+                    let report = search(&params).unwrap();
+                    assert_eq!(report.exact_rule_count().unwrap(), expected, "seed {:?} target {:?} {:?}", seed, target, mode);
+                    for solution in &report.stored {
+                        assert!(verify_solution(&hex, &target, solution, mode, 4));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn stabiliser_symmetry_merges_only_equivalent_rules_for_pair_seeds() {
         let nb = Neighbourhood::moore(2, 1).unwrap();
         for seed in [vec![vec![-1, 0], vec![1, 0]], vec![vec![-1, -1], vec![1, 1]], vec![vec![0, 0], vec![1, 0]], vec![vec![0, 0], vec![2, 1]]] {
@@ -1436,6 +1478,30 @@ mod test {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_cheapest_prime_prefix_from_a_pair_is_the_wheel_of_six() {
+        // From the pair X.X, rules with at most 26 table entries reproduce 2, 3, 5, ..., 23, but none
+        // continues with 29: they continue with the numbers prime to 6 (25, 29, 31, 35, ...), which
+        // agree with the primes exactly until 25 = 5^2.
+        let nb = Neighbourhood::moore(2, 1).unwrap();
+        let seed = vec![vec![-1, 0], vec![1, 0]];
+        let bounded = |target: Vec<usize>| {
+            let mut params = SearchParams::new(nb.clone(), target);
+            params.seed = seed.clone();
+            params.max_entries = Some(26);
+            params.parallel = false;
+            params.store_limit = 1;
+            search(&params).unwrap()
+        };
+        let primes = bounded(vec![2, 3, 5, 7, 11, 13, 17, 19, 23, 29]);
+        assert!(primes.complete());
+        assert_eq!((primes.solutions, primes.matched_terms()), (0, 9));
+        let wheel: Vec<usize> = [2, 3].into_iter().chain((5..60).filter(|n| n % 2 != 0 && n % 3 != 0)).collect();
+        let wheel_run = bounded(wheel.clone());
+        assert!(wheel_run.complete() && wheel_run.solutions > 0);
+        assert!(verify_solution(&nb, &wheel, &wheel_run.stored[0], SurvivalMode::Free, 4));
     }
 
     #[test]

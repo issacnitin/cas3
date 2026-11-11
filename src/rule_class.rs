@@ -14,7 +14,7 @@
 * the search assigns one value per key, so a rule of a smaller class is a table with tied entries.
 */
 
-use crate::lattice::{Neighbourhood, SymmetryGroup};
+use crate::lattice::{apply_matrix, Neighbourhood, SymmetryGroup};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleClass {
@@ -60,15 +60,48 @@ pub struct Classifier {
 
 impl Classifier {
     pub fn new(class: RuleClass, nb: &Neighbourhood) -> Result<Self, String> {
+        Classifier::with_symmetries(class, nb, &[])
+    }
+
+    /// As `new`, with the isotropy group given as integer matrices (for lattices such as the
+    /// hexagonal one whose symmetries are not signed permutations). Empty: the signed permutations
+    /// that preserve the neighbourhood.
+    pub fn with_symmetries(
+        class: RuleClass,
+        nb: &Neighbourhood,
+        matrices: &[Vec<Vec<i32>>],
+    ) -> Result<Self, String> {
         let k = nb.len();
         let mut perms = vec![];
         if class == RuleClass::Isotropic {
-            for g in &SymmetryGroup::preserving(nb).elements {
+            let maps: Vec<Box<dyn Fn(&[i32]) -> Vec<i32>>> = if matrices.is_empty() {
+                SymmetryGroup::preserving(nb)
+                    .elements
+                    .into_iter()
+                    .map(|g| {
+                        Box::new(move |o: &[i32]| g.apply_offset(o))
+                            as Box<dyn Fn(&[i32]) -> Vec<i32>>
+                    })
+                    .collect()
+            } else {
+                matrices
+                    .iter()
+                    .filter(|m| {
+                        (0..nb.dim).any(|i| (0..nb.dim).any(|j| m[i][j] != (i == j) as i32))
+                    })
+                    .map(|m| {
+                        let m = m.clone();
+                        Box::new(move |o: &[i32]| apply_matrix(&m, o))
+                            as Box<dyn Fn(&[i32]) -> Vec<i32>>
+                    })
+                    .collect()
+            };
+            for g in &maps {
                 let perm = nb
                     .offsets
                     .iter()
                     .map(|offset| {
-                        let image = g.apply_offset(offset);
+                        let image = g(offset);
                         nb.offsets
                             .iter()
                             .position(|other| *other == image)
@@ -275,6 +308,45 @@ mod test {
             naive_classes.insert(naive, mask);
         }
         assert_eq!(naive_classes.len(), 51);
+    }
+
+    #[test]
+    fn hexagonal_isotropy_is_the_bracelet_classification() {
+        // The six hexagonal neighbours form a ring, and the 12 lattice symmetries act on it as the
+        // rotations and reflections of a bracelet: 13 bracelets of 6 two-coloured beads.
+        let hex = Neighbourhood::hexagonal();
+        let c = Classifier::with_symmetries(
+            RuleClass::Isotropic,
+            &hex,
+            &crate::lattice::hexagonal_symmetries(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                c.birth_entries(),
+                c.survival_entries(),
+                c.invariance_order()
+            ),
+            (12, 13, 12)
+        );
+        let ring = |mask: u64, shift: u32, flip: bool| -> u64 {
+            (0..6)
+                .filter(|&j| mask >> j & 1 == 1)
+                .fold(0u64, |image, j| {
+                    let position = if flip { (6 - j) % 6 } else { j };
+                    image | 1 << ((position + shift) % 6)
+                })
+        };
+        for mask in 0..64u64 {
+            let naive = (0..6)
+                .flat_map(|s| [ring(mask, s, false), ring(mask, s, true)])
+                .min()
+                .unwrap();
+            assert_eq!(c.key(mask), naive, "mask {:06b}", mask);
+        }
+        // Without the matrices only the square symmetries that preserve the hexagon are found.
+        let square = Classifier::new(RuleClass::Isotropic, &hex).unwrap();
+        assert_eq!(square.invariance_order(), 4);
     }
 
     #[test]

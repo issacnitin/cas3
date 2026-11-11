@@ -73,6 +73,13 @@ impl Neighbourhood {
         Neighbourhood::new(dim, offsets)
     }
 
+    /// The six neighbours of the hexagonal lattice in axial coordinates, in ring order (each one is
+    /// the previous one turned by 60 degrees).
+    pub fn hexagonal() -> Self {
+        let ring = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+        Neighbourhood::new(2, ring.iter().map(|o| o.to_vec()).collect()).expect("valid hexagonal offsets")
+    }
+
     pub fn len(&self) -> usize {
         self.offsets.len()
     }
@@ -260,6 +267,49 @@ impl SymmetryGroup {
         }
         lattice.encode(&y[..dim])
     }
+}
+
+/// The 12 symmetries of the hexagonal lattice in axial coordinates (identity first) as integer
+/// matrices: powers of the 60 degree turn (q, r) -> (-r, q + r), each with and without the
+/// reflection (q, r) -> (r, q). They are not signed permutations, so `SymmetryGroup` cannot list them.
+pub fn hexagonal_symmetries() -> Vec<Vec<Vec<i32>>> {
+    let multiply = |a: &Vec<Vec<i32>>, b: &Vec<Vec<i32>>| -> Vec<Vec<i32>> {
+        (0..2).map(|i| (0..2).map(|j| (0..2).map(|k| a[i][k] * b[k][j]).sum()).collect()).collect()
+    };
+    let turn = vec![vec![0, -1], vec![1, 1]];
+    let mirror = vec![vec![0, 1], vec![1, 0]];
+    let mut power = vec![vec![1, 0], vec![0, 1]];
+    let mut rotations = vec![];
+    for _ in 0..6 {
+        rotations.push(power.clone());
+        power = multiply(&turn, &power);
+    }
+    let mut all = rotations.clone();
+    all.extend(rotations.iter().map(|r| multiply(r, &mirror)));
+    all
+}
+
+#[cfg(test)]
+#[test]
+fn hexagonal_symmetries_form_the_group_of_the_hexagon() {
+    let all = hexagonal_symmetries();
+    let distinct: HashSet<Vec<Vec<i32>>> = all.iter().cloned().collect();
+    assert_eq!(distinct.len(), 12);
+    let ring: HashSet<Vec<i32>> = Neighbourhood::hexagonal().offsets.into_iter().collect();
+    for m in &all {
+        let image: HashSet<Vec<i32>> = ring.iter().map(|o| apply_matrix(m, o)).collect();
+        assert_eq!(image, ring);
+        for other in &all {
+            let product: Vec<Vec<i32>> =
+                (0..2).map(|i| (0..2).map(|j| (0..2).map(|k| m[i][k] * other[k][j]).sum()).collect()).collect();
+            assert!(distinct.contains(&product));
+        }
+    }
+}
+
+/// Image of an offset under an integer matrix.
+pub fn apply_matrix(matrix: &[Vec<i32>], offset: &[i32]) -> Vec<i32> {
+    matrix.iter().map(|row| row.iter().zip(offset).map(|(a, x)| a * x).sum()).collect()
 }
 
 /// All offsets within Chebyshev distance `radius` (the cell itself excluded), in odometer order.

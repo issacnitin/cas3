@@ -13,7 +13,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::bounds::{interacting_pair_offsets, pair_representatives, pair_seed};
+use crate::bounds::{interacting_pair_offsets, pair_representatives, pair_representatives_linear, pair_seed};
 use crate::lattice::{moore_offsets, subset_orbit_representatives_in, Neighbourhood, SymmetryGroup};
 use crate::progress::Progress;
 use crate::rule_class::RuleClass;
@@ -32,6 +32,9 @@ pub struct PairRun {
 /// (all symmetries of the neighbourhood for symmetric classes; none for a table without symmetry).
 pub fn any_start_pairs(base: &SearchParams) -> Vec<Vec<i32>> {
     let nb = &base.neighbourhood;
+    if base.class != RuleClass::Table && !base.symmetry_matrices.is_empty() {
+        return pair_representatives_linear(&interacting_pair_offsets(nb), &base.symmetry_matrices);
+    }
     let group = if base.symmetry || base.class != RuleClass::Table {
         SymmetryGroup::preserving(nb)
     } else {

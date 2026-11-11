@@ -146,7 +146,7 @@ Add `--dashboard 8787 --hold` to `search`, `profile` or `scan` and open `http://
 
 ### Scope and caveats
 
-* A rule is a birth table and a survival table over the neighbours of a cell (the cell's own state selects the table). The single-seed start, synchronous updates and an empty quiescent background are assumed. The legacy `Space` engine only updates cells it has materialised, so a birth table that fires on an empty neighbourhood behaves differently there; those rules are outside the new engine's model.
+* A rule is a birth table and a survival table over the neighbours of a cell (the cell's own state selects the table). A single seed cell (or `--seed` / `--any-start`), synchronous updates and an empty quiescent background are assumed. The legacy `Space` engine only updates cells it has materialised, so a birth table that fires on an empty neighbourhood behaves differently there; those rules are outside the new engine's model.
 * Matching a prefix is not a proof about the infinite sequence. Negative results are exact for the class and the prefix length that were searched.
 * Limits: at most 62 neighbours (so the Moore neighbourhood up to 3 dimensions), symmetry reduction up to dimension 5, and `scan` up to dimension 5.
 * Tests: `cargo test --release` (the legacy 2D test is slow); `cargo test --release -- --ignored` adds the 2^31 brute force.
@@ -165,7 +165,7 @@ So for the signal reading the answer is already "yes". I know of no result for t
 ### What can be said without any search (`src/bounds.rs`, tested)
 
 * **One dimension, any radius: impossible.** After t steps every set cell is within r·t of the seed, so the population is at most 2rt + 1. The t-th prime exceeds t·ln t (Rosser), which is at least (2r + 1)·t once t ≥ e^(2r+1). From dimension 2 the bound (2rt + 1)^d grows faster than the primes and excludes nothing.
-* **Symmetric rules in two or more dimensions: impossible.** A rule invariant under the symmetries of the neighbourhood (totalistic, Life-like) births whole orbits of neighbours, and every orbit has at least 4 cells, so the population after one step is never 2.
+* **Symmetric rules in two or more dimensions, from one cell: impossible.** A rule invariant under the symmetries of the neighbourhood (totalistic, Life-like) births whole orbits of neighbours, and every orbit has at least 4 cells, so the population after one step is never 2.
 
 ### Atlas of dead classes
 
@@ -176,6 +176,110 @@ The capacity of a class grows with its table size and hardly with the geometry (
 ### What is still open
 
 Classes that cannot be exhausted with this engine (the cost grew about 200,000 times from 4 to 5 neighbours): 6 or more neighbours, the full 2D Moore class with free survival or with cells that die every step, 3D beyond 4 neighbours, and anything with more than two states. For these the search can only fit prefixes. A positive answer for the population reading would have to be constructed (for instance by turning a time-signal generator into a population counter), not found by enumeration.
+
+## Looking for a simple rule, from any starting pattern
+
+A rule whose live-cell count "just happens" to be the primes would be a discovery only if it is
+**simple**: a rule that needs new table entries for every extra prime is memorising them, not
+generating them (see the description length above). Two additions extend the search to every
+place such a rule could be.
+
+**Simple rule classes** (`--class`, `src/rule_class.rs`). In an `isotropic` rule, patterns related
+by a rotation or reflection share one entry, so the rule looks the same in every direction
+(Hensel's isotropic rules: 101 entries for the 3×3 block). In a `totalistic` rule only the
+number of set neighbours counts, as in Life-like rules such as B3/S23 (17 entries). On the
+hexagonal lattice (`--neighbourhood hex`, axial coordinates) isotropy uses all 12 symmetries of
+the hexagon. The engine assigns one value per class and is otherwise unchanged.
+
+**Every starting pattern** (`--any-start`, or an explicit `--seed`; proofs in `src/bounds.rs`).
+The infinitely many finite starting patterns reduce to a few seeds:
+
+* *Pair reduction.* If the counts at two consecutive steps are 2 and 3, the first configuration
+  is two cells \(\{a,b\}\). If \(b-a\notin N_0-N_0\), where \(N_0\) is the neighbourhood plus the
+  cell itself, no cell reads both. Each cell then evolves alone as an identical copy, and the next
+  count is even, not 3. So any run 2, 3, 5, 7, … from any finite configuration, after any
+  transient, passes through a pair with \(b-a\in N_0-N_0\), and from then on the automaton
+  remembers nothing else. That leaves 12 pairs for the 3×3 block (5 up to symmetry) and 62 for
+  the cube (9 up to symmetry).
+* *Parity lemma.* Every isotropic or totalistic rule is unchanged by the point reflection
+  \(x\mapsto -x\). Take a pair whose midpoint is not a cell. The reflection through that midpoint
+  maps the pair to itself and fixes no cell, so the count stays even forever. Only pairs with an
+  even offset in every coordinate can reach 3.
+
+Validation:
+
+* Exact rule counts agree with brute force over every rule of small classes, for 1-, 2- and
+  3-cell seeds and for the isotropic, totalistic and hexagonal classes.
+* Symmetry reduction from a pair merges only equivalent rules.
+* An end-to-end test simulates every rule of three small classes from every small starting
+  configuration. It finds the longest run 2, 3, 5, … starting at any time, and that run equals
+  the `--any-start` result.
+
+### Simple classes, every starting pattern (exhaustive)
+
+| lattice and neighbourhood | class | entries | longest run of 2, 3, 5, 7, … |
+|---|---|---|---|
+| square, 3×3 | totalistic (Life-like) | 17 | 2, 3, 5 |
+| square, 3×3 | isotropic (Hensel) | 101 | 2, 3, 5 |
+| square, von Neumann | totalistic / isotropic | 9 / 11 | 2, 3 |
+| square, 5×5 and 7×7 | totalistic | 49 / 97 | 2, 3 |
+| hexagonal | totalistic | 13 | 2, 3, 5, 7, 11 (B2/S0234, then 15) |
+| hexagonal | isotropic | 25 | **2, 3, 5, 7, 11, 13, 17** (then 21) |
+| cube, 3×3×3 | totalistic | 53 | 2, 3 |
+| von Neumann, 3D / 4D / 5D | totalistic | 13 / 17 / 21 | 2, 3 |
+| von Neumann, 3D / 4D / 5D | isotropic | 19 / 29 / 41 | 2, 3 |
+| von Neumann, 6D | totalistic | 25 | 2, 3 |
+
+Every class in the table is dead for the whole sequence, from every starting pattern. Symmetry
+ties cells into groups that switch together, which makes small exact counts hard to hit. More
+dimensions or a larger radius make this worse, not better; the hexagonal lattice does best
+because its symmetric groups of cells are small.
+
+Rules that read at most \(r\) neighbours (`scan --any-start`, every class exhausted) reproduce at
+most 2, 3, 5, 12 primes in 2D for \(r=1,\dots,4\), and 2, 3, 5 in 3D for \(r=1,2,3\). From one cell
+the corresponding figures are 2, 2, 4, 9 and 2, 2, 4.
+
+### Minimal rule size, every starting pattern
+
+`profile --any-start` reports, for the first \(L\) primes, the fewest table entries any rule needs
+from the best close pair, that is, from any starting pattern:
+
+| primes matched | 2, 3 | …5 | …7 | …11 | …13 | …17 | …19 | …23 | …29 | …31 | …37 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| square, 3×3 | 10 | 12 | 16 | 20 | 23 | 23 | 26 | 26 | 38 | 41 | 44 |
+| hexagonal | 8 | 10 | 14 | 19 | 20 | 24 | 24 | 24 | 34 | 39 | 42 |
+| cube, 3×3×3 | 28 | 30 | 40 | 43 | 51 | 51 | 57 | | | | |
+| control 2, 3, 4, 5, … (square) | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 |
+
+The only flat stretch, up to 23, is not about primes. The rules that reach 23 with 26 entries
+continue 25, 29, 31, 35, 37, …: they produce the numbers that are not multiples of 2 or 3. Those
+agree with the primes up to 23 and first differ at \(25=5^2\). No rule with at most 26 entries
+continues with 29 (exhaustive; test `the_cheapest_prime_prefix_from_a_pair_is_the_wheel_of_six`).
+Getting past 25 costs 12 more entries, and each later prime costs about three more.
+
+This is what memorising a sieve looks like. A fixed rule can build in a wheel for a few small
+primes, and each new prime square then needs new entries. The hexagonal rules that reach 17
+continue with 21, not 19.
+
+**Verdict.**
+
+* No class that can be searched exhaustively contains a simple rule, from any starting pattern,
+  on the square, hexagonal or cubic lattice or in 4 to 6 dimensions.
+* The simplest rules that look like prime generators reproduce a wheel and break at 25 at the
+  latest.
+* A rule that generates every prime, if one exists, is not simple: it has to keep finding new
+  primes, which means computing them.
+* Not yet covered: rules with more than two states, symmetric classes with millions of entries
+  (3×3×3 isotropic, 5×5 isotropic; only partial results), and table rules with more than about
+  45 entries.
+
+```
+cargo run --release -- search  --class totalistic --any-start --terms 30          # every Life-like rule, every start
+cargo run --release -- search  --neighbourhood hex --class isotropic --any-start --terms 30
+cargo run --release -- profile --any-start --terms 12 --time-limit 120 --entry-cap 70
+cargo run --release -- scan    --any-start --max-arity 4 --terms 40
+cargo run --release -- search  --seed "-1,0;1,0" --target 2,3,5,7,11,13,17,19,23,25,29 --max-entries 26 --show 1
+```
 
 ## Constructive route
 
@@ -435,7 +539,9 @@ The remaining local construction is narrower than before but still essential:
 The original expression search still only gets as far as the 2nd dimension if you run it long
 enough.  The rule-table search answers the prefix question exactly for much larger classes than
 that: in every class tried, short prefixes of the primes can be matched but no compact rule was
-found, and the minimum description length of the prime prefixes keeps growing. The constructive
+found, and the minimum description length of the prime prefixes keeps growing. This now holds
+from every starting pattern as well (pair reduction): every symmetric class tested dies within
+seven primes, and the cheapest long fits are wheels for 2 and 3 that break at 25. The constructive
 answer now has recurrent arithmetic, ordered batches, explicit throughput/population bounds and a
 binary compiler. The whole population question remains open until the local epoch factory,
 gap-to-mask transport, arena invariant and all-\(t\) handoff induction are complete.

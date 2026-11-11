@@ -31,11 +31,13 @@ pub fn light_cone_limit(dim: usize, radius: usize, t: usize) -> u128 {
 }
 
 /// First term (counted from t = 0) of `target` that no rule of this dimension and radius can reach.
+/// target[0] is the number of seed cells, and each of them has its own light cone.
 pub fn first_light_cone_violation(dim: usize, radius: usize, target: &[usize]) -> Option<usize> {
+    let seeds = target.first().copied().unwrap_or(1).max(1) as u128;
     target
         .iter()
         .enumerate()
-        .find(|&(t, &count)| count as u128 > light_cone_limit(dim, radius, t))
+        .find(|&(t, &count)| count as u128 > seeds.saturating_mul(light_cone_limit(dim, radius, t)))
         .map(|(t, _)| t)
 }
 
@@ -75,6 +77,24 @@ pub fn pair_representatives(offsets: &[Vec<i32>], group: &SymmetryGroup) -> Vec<
             }
             let negated: Vec<i32> = d.iter().map(|x| -x).collect();
             best.max(negated)
+        })
+        .collect();
+    reps.sort();
+    reps.dedup();
+    reps
+}
+
+/// As `pair_representatives` for a group given by integer matrices.
+pub fn pair_representatives_linear(offsets: &[Vec<i32>], matrices: &[Vec<Vec<i32>>]) -> Vec<Vec<i32>> {
+    let mut reps: Vec<Vec<i32>> = offsets
+        .iter()
+        .map(|d| {
+            let mut best = d.clone();
+            for image in matrices.iter().map(|m| crate::lattice::apply_matrix(m, d)) {
+                let negated: Vec<i32> = image.iter().map(|x| -x).collect();
+                best = best.max(image).max(negated);
+            }
+            best
         })
         .collect();
     reps.sort();

@@ -58,7 +58,8 @@ COMMANDS:
 
 OPTIONS (search, profile, scan):
     --dim N                 lattice dimension                          [default: 2]
-    --neighbourhood KIND    moore | vonneumann                         [default: moore]
+    --neighbourhood KIND    moore | vonneumann | hex (2D hexagonal lattice, axial
+                            coordinates, with its 12 symmetries)       [default: moore]
     --radius R              Moore radius                               [default: 1]
     --offsets LIST          custom neighbours, e.g. \"1,0;0,1;1,1\"
     --target SPEC           primes | naturals | odds | squares | powers2 | 1,2,3,5,...
@@ -227,6 +228,8 @@ fn build_neighbourhood(opts: &Options) -> Result<Neighbourhood, String> {
     match opts.text("neighbourhood", "moore").as_str() {
         "moore" => Neighbourhood::moore(dim, opts.number::<i32>("radius")?.unwrap_or(1)),
         "vonneumann" => Neighbourhood::von_neumann(dim),
+        "hex" if dim == 2 => Ok(Neighbourhood::hexagonal()),
+        "hex" => Err("the hexagonal lattice needs --dim 2".to_string()),
         other => Err(format!("unknown neighbourhood '{}'", other)),
     }
 }
@@ -264,6 +267,9 @@ fn build_params(opts: &Options) -> Result<SearchParams, String> {
     let mut params = SearchParams::new(nb, target);
     params.seed = seed;
     params.class = RuleClass::parse(&opts.text("class", "table"))?;
+    if opts.text("neighbourhood", "moore") == "hex" && !opts.values.contains_key("offsets") {
+        params.symmetry_matrices = crate::lattice::hexagonal_symmetries();
+    }
     params.survival = parse_survival(&opts.text("survival", "free"))?;
     params.symmetry = !opts.flag("no-symmetry");
     params.find_first = opts.flag("first");
@@ -340,8 +346,9 @@ fn describe_solution(nb: &Neighbourhood, solution: &Solution, mode: SurvivalMode
 }
 
 /// Size of the rule class as "2^bits rules" (birth plus survival entries).
-fn class_space(nb: &Neighbourhood, class: RuleClass, mode: SurvivalMode) -> Result<String, String> {
-    let classifier = Classifier::new(class, nb)?;
+fn class_space(params: &SearchParams) -> Result<String, String> {
+    let (nb, class, mode) = (&params.neighbourhood, params.class, params.survival);
+    let classifier = Classifier::with_symmetries(class, nb, &params.symmetry_matrices)?;
     let entries = classifier.birth_entries()
         + if mode == SurvivalMode::Free {
             classifier.survival_entries()
@@ -350,7 +357,8 @@ fn class_space(nb: &Neighbourhood, class: RuleClass, mode: SurvivalMode) -> Resu
         };
     let invariance = match class {
         RuleClass::Table => String::new(),
-        _ => format!(
+        RuleClass::Totalistic => ", only the number of set neighbours counts".to_string(),
+        RuleClass::Isotropic => format!(
             ", the same under all {} symmetries of the neighbourhood",
             classifier.invariance_order()
         ),
@@ -411,10 +419,7 @@ fn run_search(opts: &Options) -> Result<(), String> {
     if !params.seed.is_empty() {
         println!("seed          : {:?}", params.seed);
     }
-    println!(
-        "rule space    : {}",
-        class_space(nb, params.class, params.survival)?
-    );
+    println!("rule space    : {}", class_space(&params)?);
     if let Some(term) =
         crate::bounds::first_light_cone_violation(nb.dim, nb.radius() as usize, &params.target)
     {
@@ -422,7 +427,7 @@ fn run_search(opts: &Options) -> Result<(), String> {
             "note         : term {} of the target ({}) exceeds the light-cone limit of {}: no rule of this neighbourhood can reach it",
             term,
             params.target[term],
-            crate::bounds::light_cone_limit(nb.dim, nb.radius() as usize, term)
+            crate::bounds::light_cone_limit(nb.dim, nb.radius() as usize, term) * params.target[0] as u128
         );
     }
 
@@ -492,10 +497,7 @@ fn run_any_start_search(
         nb.dim,
         nb.len()
     );
-    println!(
-        "rule space    : {}",
-        class_space(&nb, params.class, params.survival)?
-    );
+    println!("rule space    : {}", class_space(&params)?);
     println!("target        : {:?}", params.target);
     println!(
         "any start     : a run 2, 3, ... from ANY configuration passes through a pair of cells closer than the reach of two neighbourhoods; {} pair shape(s) up to symmetry",
@@ -1411,7 +1413,38 @@ mod test {
         assert!(
             build_params(&parse_options(&args(&["--survival", "sometimes"])).unwrap()).is_err()
         );
-        assert!(build_params(&parse_options(&args(&["--neighbourhood", "hex"])).unwrap()).is_err());
+        assert!(
+            build_params(&parse_options(&args(&["--neighbourhood", "triangle"])).unwrap()).is_err()
+        );
+
+        let hex = build_params(
+            &parse_options(&args(&["--neighbourhood", "hex", "--class", "isotropic"])).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (hex.neighbourhood.len(), hex.symmetry_matrices.len()),
+            (6, 12)
+        );
+        assert_eq!(hex.class, RuleClass::Isotropic);
+        assert!(build_params(
+            &parse_options(&args(&["--dim", "3", "--neighbourhood", "hex"])).unwrap()
+        )
+        .is_err());
+        assert!(build_params(&parse_options(&args(&["--class", "fancy"])).unwrap()).is_err());
+
+        let pair =
+            build_params(&parse_options(&args(&["--seed", "1,0;-1,0", "--terms", "4"])).unwrap())
+                .unwrap();
+        assert_eq!(pair.seed, vec![vec![-1, 0], vec![1, 0]]);
+        assert_eq!(pair.target, vec![2, 3, 5, 7]);
+        let any =
+            build_params(&parse_options(&args(&["--any-start", "--terms", "3"])).unwrap()).unwrap();
+        assert!(any.seed.is_empty());
+        assert_eq!(any.target, vec![2, 3, 5]);
+        assert!(build_params(
+            &parse_options(&args(&["--any-start", "--seed", "0,0;2,0"])).unwrap()
+        )
+        .is_err());
     }
 
     #[test]
