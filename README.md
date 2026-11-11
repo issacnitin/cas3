@@ -229,11 +229,18 @@ Validation:
 | von Neumann, 3D / 4D / 5D | totalistic | 13 / 17 / 21 | 2, 3 |
 | von Neumann, 3D / 4D / 5D | isotropic | 19 / 29 / 41 | 2, 3 |
 | von Neumann, 6D | totalistic | 25 | 2, 3 |
+| cube, 3×3×3 | isotropic | 2,852,287 | ≥ 30 (partial, 300 s per pair) |
+| square, 5×5 | isotropic | 4,211,743 | ≥ 30 (partial, 300 s per pair) |
 
-Every class in the table is dead for the whole sequence, from every starting pattern. Symmetry
-ties cells into groups that switch together, which makes small exact counts hard to hit. More
-dimensions or a larger radius make this worse, not better; the hexagonal lattice does best
+Every class above the last two rows is dead for the whole sequence, from every starting pattern.
+Symmetry ties cells into groups that switch together, which makes small exact counts hard to hit.
+More dimensions or a larger radius make this worse, not better; the hexagonal lattice does best
 because its symmetric groups of cells are small.
+
+The last two classes are symmetric but not simple: each has millions of entries, enough to fit long
+prefixes. The 3D rule found for 30 primes (2 … 113) from the pair one cell apart consults 402
+entries (295 birth, 107 survival), about 13 per prime. That is memorising, like the
+unrestricted tables.
 
 Rules that read at most \(r\) neighbours (`scan --any-start`, every class exhausted) reproduce at
 most 2, 3, 5, 12 primes in 2D for \(r=1,\dots,4\), and 2, 3, 5 in 3D for \(r=1,2,3\). From one cell
@@ -249,9 +256,14 @@ from the best close pair, that is, from any starting pattern:
 | square, 3×3 | 10 | 12 | 16 | 20 | 23 | 23 | 26 | 26 | 38 | 41 | 44 |
 | hexagonal | 8 | 10 | 14 | 19 | 20 | 24 | 24 | 24 | 34 | 39 | 42 |
 | cube, 3×3×3 | 28 | 30 | 40 | 43 | 51 | 51 | 57 | | | | |
+| hexagonal, isotropic | 3 | 6 | 9 | 10 | 11 | 16 | dead | | | | |
+| square 5×5, isotropic | 7 | 12 | 20 | 29 | 36 | 39 | 42 | 42 | ≤ 60 | | |
+| cube 3×3×3, isotropic | 5 | 12 | 18 | 25 | 31 | 35 | 38 | 38 | 46 | | |
 | control 2, 3, 4, 5, … (square) | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 |
 
-The only flat stretch, up to 23, is not about primes. The rules that reach 23 with 26 entries
+(Isotropic rows count isotropic entries, so only the shape of a row matters across classes.)
+
+Every row climbs, and the only flat stretch (17 or 19 to 23) is not about primes. The rules that reach 23 with 26 entries
 continue 25, 29, 31, 35, 37, …: they produce the numbers that are not multiples of 2 or 3. Those
 agree with the primes up to 23 and first differ at \(25=5^2\). No rule with at most 26 entries
 continues with 29 (exhaustive; test `the_cheapest_prime_prefix_from_a_pair_is_the_wheel_of_six`).
@@ -269,9 +281,9 @@ continue with 21, not 19.
   latest.
 * A rule that generates every prime, if one exists, is not simple: it has to keep finding new
   primes, which means computing them.
-* Not yet covered: rules with more than two states, symmetric classes with millions of entries
-  (3×3×3 isotropic, 5×5 isotropic; only partial results), and table rules with more than about
-  45 entries.
+* Not yet covered: rules with more than two states, and the minimal rule size beyond about 45
+  table entries. The huge symmetric classes (3×3×3 and 5×5 isotropic) were searched only
+  partially; their 30-prime fits consult hundreds of entries.
 
 ```
 cargo run --release -- search  --class totalistic --any-start --terms 30          # every Life-like rule, every start
@@ -540,8 +552,10 @@ The original expression search still only gets as far as the 2nd dimension if yo
 enough.  The rule-table search answers the prefix question exactly for much larger classes than
 that: in every class tried, short prefixes of the primes can be matched but no compact rule was
 found, and the minimum description length of the prime prefixes keeps growing. This now holds
-from every starting pattern as well (pair reduction): every symmetric class tested dies within
-seven primes, and the cheapest long fits are wheels for 2 and 3 that break at 25. The constructive
+from every starting pattern as well (pair reduction): every symmetric class dies within
+seven primes when it is small enough to exhaust. Symmetric classes with millions of entries fit 30
+primes only by consulting hundreds of entries. The cheapest long fits are wheels for 2 and 3 that
+break at 25. The constructive
 answer now has recurrent arithmetic, ordered batches, explicit throughput/population bounds and a
 binary compiler. The whole population question remains open until the local epoch factory,
 gap-to-mask transport, arena invariant and all-\(t\) handoff induction are complete.
