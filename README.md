@@ -389,7 +389,9 @@ the record into an already-active padding conveyor; prime words and composite-em
 away in candidate order while a fresh slot remains at the station. With the epoch's fixed worker
 width this complete cycle is population-neutral. A stationary finite accumulator samples those
 moving words most-significant bit first and emits the same fixed-width chunk states used by the
-packed queue, preserving composite holes. `src/gap_plan.rs`
+packed queue, preserving composite holes. `src/packed_subtract.rs` subtracts two such packed
+records chunk by chunk: a result row between them starts at the least significant chunk and a
+borrow wave moves one chunk per step towards the most significant end. `src/gap_plan.rs`
 then implements the exact weight-four arithmetic after consecutive prime records are subtracted:
 adding the current two-bit tail residue makes the low two sum bits the next residue and all higher
 bits the split count. The synchronized typed-output variant can assign every split child a concrete

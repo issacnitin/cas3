@@ -20,6 +20,7 @@ mod firing_squad;
 mod gap_plan;
 mod mask_writer;
 mod packed_queue;
+mod packed_subtract;
 mod prime_worker;
 mod record_writer;
 mod scheduler;
