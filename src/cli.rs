@@ -160,7 +160,7 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 7] = [
+const FLAG_NAMES: [&str; 9] = [
     "no-symmetry",
     "first",
     "sequential",
@@ -168,6 +168,8 @@ const FLAG_NAMES: [&str; 7] = [
     "verbose",
     "force",
     "any-start",
+    "direct",
+    "certificate",
 ];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -935,6 +937,147 @@ fn run_scan(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `primeca`: run the prime-counting automaton and check the number of set cells at every step.
+fn run_primeca(opts: &Options) -> Result<(), String> {
+    use crate::prime_display::{Simulation, BOOTSTRAP_LAST, BOOTSTRAP_ROWS};
+    if opts.flag("certificate") {
+        use crate::prime_display::{creation_step, last_row_in_64_bits, timing_certificate};
+        let rows = opts
+            .number::<u64>("rows")?
+            .unwrap_or_else(last_row_in_64_bits);
+        let started = std::time::Instant::now();
+        println!(
+            "timing certificate for rows {}..={} (every row after the table)",
+            BOOTSTRAP_ROWS + 1,
+            rows
+        );
+        match timing_certificate(rows) {
+            Ok((row, margin)) => {
+                println!(
+                    "every tile learns its flip time in time; tightest bound: row {} with {:.1} steps to spare ({:.2?})",
+                    row,
+                    margin,
+                    started.elapsed()
+                );
+                let overflow = creation_step(rows + 2);
+                if rows == last_row_in_64_bits() {
+                    println!(
+                        "row {} is the first whose numbers overflow 64 bits; it appears at step {}, so the 64-bit rule is exact for every step before that",
+                        rows + 2,
+                        overflow
+                    );
+                } else {
+                    println!("(row {} appears at step {})", rows + 2, overflow);
+                }
+            }
+            Err(row) => return Err(format!("the bound fails at row {}", row)),
+        }
+        return Ok(());
+    }
+    let steps = opts.number::<u64>("steps")?.unwrap_or(1000);
+    let every = opts.number::<u64>("report")?.unwrap_or((steps / 10).max(1));
+    // Primes up to a bound safely above p_steps (p_t < t (ln t + ln ln t) for t >= 6).
+    let t = steps.max(6) as f64;
+    let limit = (t * (t.ln() + t.ln().ln()) + 100.0) as usize;
+    let mut composite = vec![false; limit + 1];
+    let mut primes = vec![];
+    for m in 2..=limit {
+        if !composite[m] {
+            primes.push(m as u64);
+            let mut k = m * m;
+            while k <= limit {
+                composite[k] = true;
+                k += m;
+            }
+        }
+    }
+    println!(
+        "prime-counting cellular automaton: 2D, Moore neighbourhood, one rule; seed = 1 set cell; flip times of n <= {} (rows <= {}) come from the rule's table, all larger n are computed by the cells",
+        BOOTSTRAP_LAST, BOOTSTRAP_ROWS
+    );
+    let started = std::time::Instant::now();
+    let direct = opts.flag("direct");
+    println!(
+        "simulation: {}",
+        if direct {
+            "direct (the rule applied to every cell of the triangle at every step)"
+        } else {
+            "by events (the rule evaluated wherever the state can change; cross-checked against the direct simulation in the tests)"
+        }
+    );
+    let mut dense = if direct {
+        Some(Simulation::new())
+    } else {
+        None
+    };
+    let mut events = if direct {
+        None
+    } else {
+        Some(crate::prime_display::EventSimulation::new())
+    };
+    let count =
+        |d: &Option<Simulation>, e: &Option<crate::prime_display::EventSimulation>| match (d, e) {
+            (Some(d), _) => (d.set_count(), d.height()),
+            (_, Some(e)) => (e.set_count(), e.height()),
+            _ => unreachable!(),
+        };
+    println!(
+        "{:>9} {:>12} {:>12} {:>8} {:>10}",
+        "step", "set cells", "t-th prime", "rows", "time"
+    );
+    let (c0, h0) = count(&dense, &events);
+    println!(
+        "{:>9} {:>12} {:>12} {:>8} {:>10.2?}",
+        0,
+        c0,
+        "(seed)",
+        h0,
+        started.elapsed()
+    );
+    for step in 1..=steps {
+        if let Some(d) = dense.as_mut() {
+            d.step();
+        }
+        if let Some(e) = events.as_mut() {
+            e.step();
+        }
+        let (now, height) = count(&dense, &events);
+        let expected = primes[(step - 1) as usize];
+        if now != expected {
+            return Err(format!(
+                "step {}: {} set cells, but the {}-th prime is {}",
+                step, now, step, expected
+            ));
+        }
+        if step % every == 0 || step == steps {
+            println!(
+                "{:>9} {:>12} {:>12} {:>8} {:>10.2?}",
+                step,
+                now,
+                expected,
+                height,
+                started.elapsed()
+            );
+        }
+    }
+    println!(
+        "all {} steps match: the number of set cells is the next prime after every application of the rule",
+        steps
+    );
+    let margin = match (&dense, &events) {
+        (Some(d), _) => d.min_margin,
+        (_, Some(e)) => e.min_margin,
+        _ => None,
+    };
+    if let Some((margin, n)) = margin {
+        println!(
+            "tightest computed flip: cell {} learned its flip time {} steps early",
+            n, margin
+        );
+    }
+    Ok(())
+}
+
 /// `sweep`: symmetric families from every starting pattern, dimension by dimension.
 fn run_sweep(opts: &Options) -> Result<(), String> {
     use crate::dimension_sweep::{sweep, Family, MAX_SWEEP_DIM};
@@ -1425,6 +1568,7 @@ pub fn run() {
         "mask" => parse_options(&args[1..]).and_then(|o| run_mask(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "sweep" => parse_options(&args[1..]).and_then(|o| run_sweep(&o)),
+        "primeca" => parse_options(&args[1..]).and_then(|o| run_primeca(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {
             print!("{}", USAGE);
