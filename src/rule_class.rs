@@ -29,7 +29,10 @@ impl RuleClass {
             "table" => Ok(RuleClass::Table),
             "isotropic" => Ok(RuleClass::Isotropic),
             "totalistic" => Ok(RuleClass::Totalistic),
-            other => Err(format!("unknown rule class '{}' (table | isotropic | totalistic)", other)),
+            other => Err(format!(
+                "unknown rule class '{}' (table | isotropic | totalistic)",
+                other
+            )),
         }
     }
 
@@ -81,9 +84,16 @@ impl Classifier {
             RuleClass::Totalistic => k as u128 + 1,
             RuleClass::Isotropic => burnside(k, &perms),
         };
-        let mut classifier = Classifier { class, perms, dense: vec![], pattern_classes };
+        let mut classifier = Classifier {
+            class,
+            perms,
+            dense: vec![],
+            pattern_classes,
+        };
         if class == RuleClass::Isotropic && k <= DENSE_KEYS {
-            classifier.dense = (0..1u64 << k).map(|mask| classifier.canonical(mask)).collect();
+            classifier.dense = (0..1u64 << k)
+                .map(|mask| classifier.canonical(mask))
+                .collect();
         }
         Ok(classifier)
     }
@@ -155,15 +165,30 @@ fn burnside(k: usize, perms: &[Vec<u8>]) -> u128 {
 
 /// Life-like notation of the consulted entries of a totalistic rule, e.g. "B3/S23".
 /// Unconsulted counts are left out; `?` lists them.
-pub fn totalistic_notation(k: usize, birth: &[(u64, bool)], survival: Option<&[(u64, bool)]>) -> String {
+pub fn totalistic_notation(
+    k: usize,
+    birth: &[(u64, bool)],
+    survival: Option<&[(u64, bool)]>,
+) -> String {
     let on = |entries: &[(u64, bool)]| -> String {
-        let mut counts: Vec<u64> = entries.iter().filter(|(_, v)| *v).map(|(c, _)| *c).collect();
+        let mut counts: Vec<u64> = entries
+            .iter()
+            .filter(|(_, v)| *v)
+            .map(|(c, _)| *c)
+            .collect();
         counts.sort_unstable();
-        counts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+        counts
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     };
     let free = |entries: &[(u64, bool)], from: u64| -> String {
         let consulted: Vec<u64> = entries.iter().map(|(c, _)| *c).collect();
-        let open: Vec<String> = (from..=k as u64).filter(|c| !consulted.contains(c)).map(|c| c.to_string()).collect();
+        let open: Vec<String> = (from..=k as u64)
+            .filter(|c| !consulted.contains(c))
+            .map(|c| c.to_string())
+            .collect();
         if open.is_empty() {
             String::new()
         } else {
@@ -191,10 +216,18 @@ mod test {
         let tot = Classifier::new(RuleClass::Totalistic, &moore).unwrap();
         assert_eq!((tot.birth_entries(), tot.survival_entries()), (8, 9));
         let table = Classifier::new(RuleClass::Table, &moore).unwrap();
-        assert_eq!((table.birth_entries(), table.survival_entries()), (255, 256));
+        assert_eq!(
+            (table.birth_entries(), table.survival_entries()),
+            (255, 256)
+        );
 
         let vn = Neighbourhood::von_neumann(2).unwrap();
-        assert_eq!(Classifier::new(RuleClass::Isotropic, &vn).unwrap().survival_entries(), 6);
+        assert_eq!(
+            Classifier::new(RuleClass::Isotropic, &vn)
+                .unwrap()
+                .survival_entries(),
+            6
+        );
         let cube = Neighbourhood::moore(3, 1).unwrap();
         let iso3 = Classifier::new(RuleClass::Isotropic, &cube).unwrap();
         assert_eq!(iso3.invariance_order(), 48);
@@ -217,8 +250,12 @@ mod test {
             |x, y| (y, x),
             |x, y| (-y, -x),
         ];
-        let index: HashMap<(i32, i32), usize> =
-            nb.offsets.iter().enumerate().map(|(j, o)| ((o[0], o[1]), j)).collect();
+        let index: HashMap<(i32, i32), usize> = nb
+            .offsets
+            .iter()
+            .enumerate()
+            .map(|(j, o)| ((o[0], o[1]), j))
+            .collect();
         let mut naive_classes: HashMap<u64, u64> = HashMap::new();
         for mask in 0..256u64 {
             let naive = maps

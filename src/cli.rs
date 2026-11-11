@@ -6,11 +6,11 @@ use crate::analysis::{
     any_start_pairs, any_start_search, arity_scan_with, combine_profiles, complexity_profile,
     legacy_expression_variants, PairRun,
 };
+use crate::bounds::pair_has_central_cell;
 use crate::construct::{
     prepared_prime_output_config, prime_mass_trace, BlockCodec, LocalRule, PreparedPrimeOutputRule,
     TAIL_BASE, TAIL_RESIDUES,
 };
-use crate::bounds::pair_has_central_cell;
 use crate::dashboard;
 use crate::lattice::Neighbourhood;
 use crate::mask_writer::SynchronizedPrimeOutput;
@@ -19,7 +19,8 @@ use crate::prime_worker::{
 };
 use crate::progress::Progress;
 use crate::reference::{
-    pattern_to_string, reference_states_from, render_evolution, seed_config, verify_solution, SolutionRule,
+    pattern_to_string, reference_states_from, render_evolution, seed_config, verify_solution,
+    SolutionRule,
 };
 use crate::rule_class::{totalistic_notation, Classifier, RuleClass};
 use crate::scheduler::{FifoResult, IntegratedCandidate, PrimeEpochPlan, RollingBatchField};
@@ -208,7 +209,11 @@ fn parse_cell_list(list: &str) -> Result<Vec<Vec<i32>>, String> {
     list.split(';')
         .map(|o| {
             o.split(',')
-                .map(|x| x.trim().parse::<i32>().map_err(|_| format!("bad offset '{}'", o)))
+                .map(|x| {
+                    x.trim()
+                        .parse::<i32>()
+                        .map_err(|_| format!("bad offset '{}'", o))
+                })
                 .collect::<Result<Vec<i32>, String>>()
         })
         .collect()
@@ -250,7 +255,11 @@ fn build_params(opts: &Options) -> Result<SearchParams, String> {
     if opts.flag("any-start") && !seed.is_empty() {
         return Err("--any-start and --seed are exclusive".to_string());
     }
-    let start = if opts.flag("any-start") { 2 } else { seed.len().max(1) };
+    let start = if opts.flag("any-start") {
+        2
+    } else {
+        seed.len().max(1)
+    };
     let target = parse_target_from(&opts.text("target", "primes"), terms, start)?;
     let mut params = SearchParams::new(nb, target);
     params.seed = seed;
@@ -319,9 +328,14 @@ fn describe_solution(nb: &Neighbourhood, solution: &Solution, mode: SurvivalMode
         SurvivalMode::Never => text.push_str("  survival: set cells die after one step\n"),
     }
     if solution.classifier.class() == RuleClass::Isotropic {
-        text.push_str("  (isotropic: each pattern shown stands for all its rotations and reflections)\n");
+        text.push_str(
+            "  (isotropic: each pattern shown stands for all its rotations and reflections)\n",
+        );
     }
-    text.push_str(&format!("  symmetric images: {}   seed: {:?}\n", solution.orbit, solution.seed));
+    text.push_str(&format!(
+        "  symmetric images: {}   seed: {:?}\n",
+        solution.orbit, solution.seed
+    ));
     text
 }
 
@@ -329,12 +343,25 @@ fn describe_solution(nb: &Neighbourhood, solution: &Solution, mode: SurvivalMode
 fn class_space(nb: &Neighbourhood, class: RuleClass, mode: SurvivalMode) -> Result<String, String> {
     let classifier = Classifier::new(class, nb)?;
     let entries = classifier.birth_entries()
-        + if mode == SurvivalMode::Free { classifier.survival_entries() } else { 0 };
+        + if mode == SurvivalMode::Free {
+            classifier.survival_entries()
+        } else {
+            0
+        };
     let invariance = match class {
         RuleClass::Table => String::new(),
-        _ => format!(", the same under all {} symmetries of the neighbourhood", classifier.invariance_order()),
+        _ => format!(
+            ", the same under all {} symmetries of the neighbourhood",
+            classifier.invariance_order()
+        ),
     };
-    Ok(format!("2^{} rules ({} class, {} entries{})", entries, class.name(), entries, invariance))
+    Ok(format!(
+        "2^{} rules ({} class, {} entries{})",
+        entries,
+        class.name(),
+        entries,
+        invariance
+    ))
 }
 
 /// Starts the live dashboard when `--dashboard PORT` is given and returns the shared telemetry.
@@ -453,11 +480,22 @@ fn print_solution(nb: &Neighbourhood, params: &SearchParams, solution: &Solution
 }
 
 /// `search --any-start`: every close pair, then the verdict for every starting configuration.
-fn run_any_start_search(opts: &Options, params: SearchParams, progress: Option<Arc<Progress>>) -> Result<(), String> {
+fn run_any_start_search(
+    opts: &Options,
+    params: SearchParams,
+    progress: Option<Arc<Progress>>,
+) -> Result<(), String> {
     let nb = params.neighbourhood.clone();
     let pairs = any_start_pairs(&params);
-    println!("neighbourhood : dim {} with {} neighbours", nb.dim, nb.len());
-    println!("rule space    : {}", class_space(&nb, params.class, params.survival)?);
+    println!(
+        "neighbourhood : dim {} with {} neighbours",
+        nb.dim,
+        nb.len()
+    );
+    println!(
+        "rule space    : {}",
+        class_space(&nb, params.class, params.survival)?
+    );
     println!("target        : {:?}", params.target);
     println!(
         "any start     : a run 2, 3, ... from ANY configuration passes through a pair of cells closer than the reach of two neighbourhoods; {} pair shape(s) up to symmetry",
@@ -497,7 +535,11 @@ fn run_any_start_search(opts: &Options, params: SearchParams, progress: Option<A
             ));
         }
     })?;
-    let best = runs.iter().map(|r| r.report.matched_terms()).max().unwrap_or(0);
+    let best = runs
+        .iter()
+        .map(|r| r.report.matched_terms())
+        .max()
+        .unwrap_or(0);
     let exhaustive = runs.iter().all(|r| r.report.complete());
     println!();
     if exhaustive && best < params.target.len() {
@@ -509,11 +551,21 @@ fn run_any_start_search(opts: &Options, params: SearchParams, progress: Option<A
             &params.target[..best]
         );
     } else if exhaustive {
-        println!("EXHAUSTIVE: some pair reproduces all {} target terms", params.target.len());
+        println!(
+            "EXHAUSTIVE: some pair reproduces all {} target terms",
+            params.target.len()
+        );
     } else {
-        println!("partial (a limit was hit): the longest run found is {} terms, a lower bound", best);
+        println!(
+            "partial (a limit was hit): the longest run found is {} terms, a lower bound",
+            best
+        );
     }
-    if let Some(run) = runs.iter().filter(|r| !r.report.stored.is_empty()).max_by_key(|r| r.report.matched_terms()) {
+    if let Some(run) = runs
+        .iter()
+        .filter(|r| !r.report.stored.is_empty())
+        .max_by_key(|r| r.report.matched_terms())
+    {
         for (n, solution) in run.report.stored.iter().enumerate() {
             let verified = verify_solution(&nb, &params.target, solution, params.survival, 16);
             println!();
@@ -682,9 +734,11 @@ fn run_any_start_profile(
         pair.seed = crate::bounds::pair_seed(&offset);
         pair.label = format!("{} · pair {:?}", params.label, offset);
         let mut line = format!("pair {:>12}:", format!("{:?}", offset));
-        let rows = complexity_profile(&pair, 2, last, entry_cap, attempt_limit, |row| match row.min_entries {
-            Some(m) => line.push_str(&format!(" {}", m)),
-            None => line.push_str(&format!(" >{}", row.ruled_out_below.saturating_sub(1))),
+        let rows = complexity_profile(&pair, 2, last, entry_cap, attempt_limit, |row| {
+            match row.min_entries {
+                Some(m) => line.push_str(&format!(" {}", m)),
+                None => line.push_str(&format!(" >{}", row.ruled_out_below.saturating_sub(1))),
+            }
         })?;
         println!("{}", line);
         if let Some(p) = &progress {
@@ -693,7 +747,10 @@ fn run_any_start_profile(
         per_pair.push(rows);
     }
     println!();
-    println!("minimal entries over every starting configuration (L = terms of {:?}):", params.target);
+    println!(
+        "minimal entries over every starting configuration (L = terms of {:?}):",
+        params.target
+    );
     println!("{:>4} {:>6} {:>12}", "L", "term", "min entries");
     for (terms, best, exact) in combine_profiles(&per_pair) {
         println!(
