@@ -3,7 +3,8 @@
 * ======================
 * A rule is a pair of lookup tables over neighbourhood patterns: BIRTH (cell currently unset) and
 * SURVIVAL (cell currently set). The pattern of a cell is the bit mask of which neighbours are set.
-* The CA starts from one set cell and must have exactly target[t] set cells at every time t.
+* The CA starts from a seed (by default one set cell) and must have exactly target[t] set cells at
+* every time t. A rule class (table, isotropic, totalistic) decides which patterns share an entry.
 *
 * Instead of enumerating formulas, the search simulates the automaton and only decides a table entry
 * the first time the simulation needs it (the "consulted" patterns). Every node of the search tree is
@@ -32,6 +33,7 @@ use rayon::prelude::*;
 
 use crate::lattice::{Lattice, Neighbourhood, SymmetryGroup, MAX_NEIGHBOURS};
 use crate::progress::{Preview, Progress};
+use crate::rule_class::{Classifier, RuleClass};
 
 /// Bit 63 of a scatter entry marks "this cell is itself set"; pattern masks use bits 0..62.
 const SELF_BIT: u64 = 1 << 63;
@@ -60,6 +62,9 @@ pub enum StopReason {
 pub struct SearchParams {
     pub neighbourhood: Neighbourhood,
     pub target: Vec<usize>,
+    /// Seed cell offsets; empty means the single cell at the origin. target[0] = number of cells.
+    pub seed: Vec<Vec<i32>>,
+    pub class: RuleClass,
     pub survival: SurvivalMode,
     pub symmetry: bool,
     pub find_first: bool,
@@ -78,6 +83,8 @@ impl SearchParams {
         SearchParams {
             neighbourhood,
             target,
+            seed: vec![],
+            class: RuleClass::Table,
             survival: SurvivalMode::Free,
             symmetry: true,
             find_first: false,
@@ -93,13 +100,17 @@ impl SearchParams {
     }
 }
 
-/// The table entries a solution consulted. Every other entry is a don't-care.
+/// The table entries a solution consulted, keyed by the class key of the pattern (the mask itself
+/// for unrestricted tables). Every other entry is a don't-care.
 #[derive(Clone, Debug)]
 pub struct Solution {
     pub birth: Vec<(u64, bool)>,
     pub survival: Vec<(u64, bool)>,
     /// Number of distinct rules in the symmetry orbit this representative stands for.
     pub orbit: usize,
+    pub classifier: Arc<Classifier>,
+    /// Seed cells the solution was found from.
+    pub seed: Vec<Vec<i32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +241,12 @@ fn lookup_in(birth: &Store, survive: &Store, mode: SurvivalMode, is_set: bool, m
 
 struct Ctx {
     k: usize,
+    classifier: Arc<Classifier>,
+    seed: Vec<Vec<i32>>,
+    seed_cells: Vec<i64>,
+    /// Symmetries that fix the seed (identity excluded) and the order of the group they generate.
+    root_stab: Vec<u16>,
+    root_order: usize,
     deltas: Vec<i64>,
     target: Vec<usize>,
     survival: SurvivalMode,
@@ -251,30 +268,60 @@ impl Ctx {
     fn new(params: &SearchParams) -> Result<Ctx, String> {
         let nb = &params.neighbourhood;
         let target = &params.target;
-        if target.first() != Some(&1) {
-            return Err("the target must start with 1 (the single seed cell)".to_string());
+        let mut seed = if params.seed.is_empty() { vec![vec![0; nb.dim]] } else { params.seed.clone() };
+        if seed.iter().any(|cell| cell.len() != nb.dim) {
+            return Err(format!("every seed cell needs {} coordinates", nb.dim));
+        }
+        seed.sort();
+        seed.dedup();
+        if target.first() != Some(&seed.len()) {
+            return Err(format!(
+                "the target must start with {} (the number of seed cells)",
+                seed.len()
+            ));
         }
         let k = nb.len();
         if k > MAX_NEIGHBOURS {
             return Err(format!("{} neighbours exceed the supported maximum of {}", k, MAX_NEIGHBOURS));
         }
-        let extent = nb.radius() * (target.len() as i32 + 1) + 1;
+        let seed_extent = seed.iter().flatten().map(|x| x.abs()).max().unwrap_or(0);
+        let extent = seed_extent + nb.radius() * (target.len() as i32 + 1) + 1;
         let lattice = Lattice::new(nb.dim, extent)?;
-        let group = if params.symmetry {
+        let classifier = Arc::new(Classifier::new(params.class, nb)?);
+        // Rules of a symmetric class are invariant under the group, so symmetry cannot merge them.
+        let group = if params.symmetry && params.class == RuleClass::Table {
             SymmetryGroup::preserving(nb)
         } else {
             SymmetryGroup::trivial()
         };
-        let birth_entries = (1u64 << k) - 1;
-        let survival_entries = if params.survival == SurvivalMode::Free { 1u64 << k } else { 0 };
+        let mut seed_cells: Vec<i64> = seed.iter().map(|cell| lattice.encode(cell)).collect();
+        seed_cells.sort_unstable();
+        // Only symmetries that map the seed onto itself relate two rules with the same counts.
+        let root_stab: Vec<u16> = (0..group.elements.len())
+            .filter(|&element| {
+                let mut image: Vec<i64> =
+                    seed_cells.iter().map(|&c| group.apply_cell(&lattice, element, c)).collect();
+                image.sort_unstable();
+                image == seed_cells
+            })
+            .map(|element| element as u16)
+            .collect();
+        let root_order = root_stab.len() + 1;
+        let birth_entries = classifier.birth_entries();
+        let survival_entries = if params.survival == SurvivalMode::Free { classifier.survival_entries() } else { 0 };
         Ok(Ctx {
             k,
+            classifier,
+            seed,
+            seed_cells,
+            root_stab,
+            root_order,
             deltas: nb.offsets.iter().map(|o| lattice.delta(o)).collect(),
             target: target.clone(),
             survival: params.survival,
             lattice,
             group,
-            total_entries: birth_entries + survival_entries,
+            total_entries: (birth_entries + survival_entries).min(u64::MAX as u128) as u64,
             max_entries: params.max_entries.unwrap_or(usize::MAX),
             store_limit: params.store_limit,
             find_first: params.find_first,
@@ -296,10 +343,11 @@ impl Ctx {
     }
 }
 
+/// A cell that may change, with the class key of its pattern.
 #[derive(Clone, Copy)]
 struct Front {
     cell: i64,
-    mask: u64,
+    key: u64,
     is_set: bool,
 }
 
@@ -538,7 +586,7 @@ impl<'a> Searcher<'a> {
             }
             level.frontier.push(Front {
                 cell,
-                mask: bits & !SELF_BIT,
+                key: ctx.classifier.key(bits & !SELF_BIT),
                 is_set: bits & SELF_BIT != 0,
             });
         }
@@ -546,10 +594,10 @@ impl<'a> Searcher<'a> {
         let mut known = 0usize;
         self.pending.clear();
         for front in &level.frontier {
-            match lookup_in(&self.birth, &self.survive, ctx.survival, front.is_set, front.mask) {
+            match lookup_in(&self.birth, &self.survive, ctx.survival, front.is_set, front.key) {
                 2 => known += 1,
                 1 => {}
-                _ => self.pending.push((front.is_set, front.mask)),
+                _ => self.pending.push((front.is_set, front.key)),
             }
         }
         self.pending.sort_unstable();
@@ -622,7 +670,7 @@ impl<'a> Searcher<'a> {
             let next = &mut tail[0];
             next.cells.clear();
             for front in &current.frontier {
-                if lookup_in(&self.birth, &self.survive, ctx.survival, front.is_set, front.mask) == 2 {
+                if lookup_in(&self.birth, &self.survive, ctx.survival, front.is_set, front.key) == 2 {
                     next.cells.push(front.cell);
                 }
             }
@@ -663,12 +711,18 @@ impl<'a> Searcher<'a> {
     fn record_solution(&mut self, t: usize, stab: &[u16]) {
         let ctx = self.ctx;
         self.solutions += 1;
-        let orbit = ctx.group.order() / (1 + stab.len());
+        let orbit = ctx.root_order / (1 + stab.len());
         let free = ctx.total_entries - self.trail.len() as u64;
         *self.weighted.entry(free).or_insert(0) += orbit as u128;
 
         if self.stored.len() < ctx.store_limit {
-            let mut solution = Solution { birth: vec![], survival: vec![], orbit };
+            let mut solution = Solution {
+                birth: vec![],
+                survival: vec![],
+                orbit,
+                classifier: ctx.classifier.clone(),
+                seed: ctx.seed.clone(),
+            };
             for &(is_set, mask, value) in &self.trail {
                 if is_set {
                     solution.survival.push((mask, value));
@@ -745,8 +799,8 @@ pub fn search(params: &SearchParams) -> Result<SearchReport, String> {
     }
     let root = Job {
         t: 0,
-        path: vec![vec![ctx.lattice.origin()]],
-        stab: (0..ctx.group.elements.len() as u16).collect(),
+        path: vec![ctx.seed_cells.clone()],
+        stab: ctx.root_stab.clone(),
         trail: vec![],
     };
     let depth = ctx.target.len();
@@ -803,6 +857,7 @@ mod test {
     use super::*;
     use crate::reference::{verify_solution, RuleFn};
     use crate::sequences::primes_target;
+    use std::collections::HashMap;
 
     fn quick(nb: Neighbourhood, target: Vec<usize>) -> SearchReport {
         let mut params = SearchParams::new(nb, target);
@@ -869,12 +924,19 @@ mod test {
         k: usize,
         neighbours: Vec<usize>,
         origin: usize,
+        side: usize,
+        half: usize,
     }
 
     impl Grid {
         fn new(nb: &Neighbourhood, steps: usize) -> Grid {
+            Grid::with_margin(nb, steps, 0)
+        }
+
+        /// A grid with room for a seed reaching `margin` cells from the origin.
+        fn with_margin(nb: &Neighbourhood, steps: usize, margin: usize) -> Grid {
             let dim = nb.dim;
-            let half = nb.radius() as usize * (steps + 1);
+            let half = nb.radius() as usize * (steps + 1) + margin;
             let side = 2 * half + 1;
             let cells = side.pow(dim as u32);
             let k = nb.len();
@@ -905,7 +967,7 @@ mod test {
                 }
             }
             let origin = (0..dim).map(|d| half * side.pow(d as u32)).sum();
-            Grid { cells, k, neighbours, origin }
+            Grid { cells, k, neighbours, origin, side, half }
         }
 
         fn matches(&self, rule: &dyn RuleFn, target: &[usize]) -> bool {
@@ -913,8 +975,25 @@ mod test {
                 return false;
             }
             let mut current = vec![false; self.cells];
-            let mut next = vec![false; self.cells];
             current[self.origin] = true;
+            self.run(rule, current, target)
+        }
+
+        fn matches_from(&self, rule: &dyn RuleFn, seed: &[Vec<i32>], target: &[usize]) -> bool {
+            let mut current = vec![false; self.cells];
+            for cell in seed {
+                let index: usize = cell
+                    .iter()
+                    .enumerate()
+                    .map(|(d, &x)| (x + self.half as i32) as usize * self.side.pow(d as u32))
+                    .sum();
+                current[index] = true;
+            }
+            target[0] == seed.len() && self.run(rule, current, target)
+        }
+
+        fn run(&self, rule: &dyn RuleFn, mut current: Vec<bool>, target: &[usize]) -> bool {
+            let mut next = vec![false; self.cells];
             for &expected in &target[1..] {
                 let mut count = 0;
                 for cell in 0..self.cells {
@@ -1196,6 +1275,167 @@ mod test {
         assert_eq!(report.solutions, 1);
         assert_eq!(report.exact_rule_count(), Some(1u128 << 7));
         assert!(search(&SearchParams::new(nb, vec![2, 3])).is_err());
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Seeds of several cells and symmetric rule classes, against brute force.
+    // ------------------------------------------------------------------------------------
+
+    /// A full rule of a class: one bit per class key (birth keys first, then survival keys).
+    struct ClassRule<'a> {
+        classifier: &'a Classifier,
+        birth_index: &'a HashMap<u64, usize>,
+        survive_index: &'a HashMap<u64, usize>,
+        bits: u64,
+        mode: SurvivalMode,
+    }
+
+    impl RuleFn for ClassRule<'_> {
+        fn birth(&self, mask: u64) -> bool {
+            mask != 0 && (self.bits >> self.birth_index[&self.classifier.key(mask)]) & 1 == 1
+        }
+
+        fn survive(&self, mask: u64) -> bool {
+            match self.mode {
+                SurvivalMode::Always => true,
+                SurvivalMode::Never => false,
+                SurvivalMode::Free => (self.bits >> self.survive_index[&self.classifier.key(mask)]) & 1 == 1,
+            }
+        }
+    }
+
+    fn class_brute_force(nb: &Neighbourhood, class: RuleClass, seed: &[Vec<i32>], target: &[usize], mode: SurvivalMode) -> u128 {
+        let classifier = Classifier::new(class, nb).unwrap();
+        let k = nb.len();
+        let mut birth_keys: Vec<u64> = (1..1u64 << k).map(|m| classifier.key(m)).collect();
+        birth_keys.sort_unstable();
+        birth_keys.dedup();
+        let mut survive_keys: Vec<u64> = (0..1u64 << k).map(|m| classifier.key(m)).collect();
+        survive_keys.sort_unstable();
+        survive_keys.dedup();
+        let birth_index: HashMap<u64, usize> = birth_keys.iter().enumerate().map(|(i, &key)| (key, i)).collect();
+        let survive_index: HashMap<u64, usize> =
+            survive_keys.iter().enumerate().map(|(i, &key)| (key, birth_keys.len() + i)).collect();
+        let bits = birth_keys.len() + if mode == SurvivalMode::Free { survive_keys.len() } else { 0 };
+        assert!(bits <= 24, "brute force is only for small classes");
+        let margin = seed.iter().flatten().map(|x| x.unsigned_abs() as usize).max().unwrap_or(0);
+        let grid = Grid::with_margin(nb, target.len() - 1, margin);
+        (0..(1u64 << bits))
+            .filter(|&b| {
+                let rule = ClassRule { classifier: &classifier, birth_index: &birth_index, survive_index: &survive_index, bits: b, mode };
+                grid.matches_from(&rule, seed, target)
+            })
+            .count() as u128
+    }
+
+    fn run_from(nb: &Neighbourhood, class: RuleClass, seed: &[Vec<i32>], target: &[usize], mode: SurvivalMode, symmetry: bool, parallel: bool) -> SearchReport {
+        let mut params = SearchParams::new(nb.clone(), target.to_vec());
+        params.seed = seed.to_vec();
+        params.class = class;
+        params.survival = mode;
+        params.symmetry = symmetry;
+        params.parallel = parallel;
+        params.threads = Some(3);
+        params.store_limit = 4;
+        search(&params).unwrap()
+    }
+
+    fn assert_exact_from(nb: &Neighbourhood, class: RuleClass, seeds: &[Vec<Vec<i32>>], targets: &[Vec<usize>], modes: &[SurvivalMode]) {
+        for seed in seeds {
+            for target in targets {
+                let target: Vec<usize> = std::iter::once(seed.len()).chain(target.iter().copied()).collect();
+                for &mode in modes {
+                    let expected = class_brute_force(nb, class, seed, &target, mode);
+                    for symmetry in [true, false] {
+                        for parallel in [false, true] {
+                            let report = run_from(nb, class, seed, &target, mode, symmetry, parallel);
+                            assert!(report.complete());
+                            assert_eq!(
+                                report.exact_rule_count().unwrap(),
+                                expected,
+                                "{:?} class, seed {:?}, target {:?}, {:?}, symmetry {}, parallel {}",
+                                class, seed, target, mode, symmetry, parallel
+                            );
+                            for solution in &report.stored {
+                                assert!(verify_solution(nb, &target, solution, mode, 4));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Continuations after the seed (the seed size is prepended).
+    fn pair_continuations() -> Vec<Vec<usize>> {
+        vec![vec![3, 5, 7], vec![2, 2, 2], vec![4, 6, 8], vec![3, 4, 5, 6], vec![1, 1], vec![3, 5, 7, 11]]
+    }
+
+    #[test]
+    fn multi_cell_seeds_exact_against_brute_force() {
+        let line = Neighbourhood::moore(1, 1).unwrap();
+        let line_seeds = vec![vec![vec![-1], vec![1]], vec![vec![0], vec![1]], vec![vec![0], vec![2]], vec![vec![-2], vec![0], vec![1]]];
+        for seed in &line_seeds {
+            let targets: Vec<Vec<usize>> = pair_continuations();
+            assert_exact_from(&line, RuleClass::Table, &[seed.clone()], &targets, &ALL_MODES);
+        }
+        let tee = Neighbourhood::new(2, vec![vec![1, 0], vec![-1, 0], vec![0, 1]]).unwrap();
+        let tee_seeds = vec![vec![vec![-1, 0], vec![1, 0]], vec![vec![0, 0], vec![1, 1]], vec![vec![0, 0], vec![0, 1]]];
+        assert_exact_from(&tee, RuleClass::Table, &tee_seeds, &pair_continuations()[..4], &ALL_MODES);
+    }
+
+    #[test]
+    fn symmetric_classes_exact_against_brute_force() {
+        let vn = Neighbourhood::von_neumann(2).unwrap();
+        let seeds = vec![vec![vec![0, 0]], vec![vec![-1, 0], vec![1, 0]], vec![vec![0, 0], vec![1, 0]], vec![vec![0, 0], vec![2, 1]]];
+        let continuations = vec![vec![2, 3, 5], vec![1, 1, 1], vec![5, 9, 13], vec![3, 5, 7], vec![4, 6, 8]];
+        for class in [RuleClass::Isotropic, RuleClass::Totalistic] {
+            assert_exact_from(&vn, class, &seeds, &continuations, &ALL_MODES);
+        }
+        let moore = Neighbourhood::moore(2, 1).unwrap();
+        let pair = vec![vec![vec![-1, 0], vec![1, 0]]];
+        assert_exact_from(&moore, RuleClass::Totalistic, &pair, &[vec![3, 5], vec![4, 4]], &[SurvivalMode::Free]);
+        assert_exact_from(&moore, RuleClass::Totalistic, &[vec![vec![0, 0]]], &[vec![5, 9], vec![9, 25]], &[SurvivalMode::Free]);
+    }
+
+    #[test]
+    fn stabiliser_symmetry_merges_only_equivalent_rules_for_pair_seeds() {
+        let nb = Neighbourhood::moore(2, 1).unwrap();
+        for seed in [vec![vec![-1, 0], vec![1, 0]], vec![vec![-1, -1], vec![1, 1]], vec![vec![0, 0], vec![1, 0]], vec![vec![0, 0], vec![2, 1]]] {
+            for target in [vec![2, 3, 5, 7], vec![2, 3, 4, 5]] {
+                let with = run_from(&nb, RuleClass::Table, &seed, &target, SurvivalMode::Free, true, false);
+                let without = run_from(&nb, RuleClass::Table, &seed, &target, SurvivalMode::Free, false, false);
+                assert_eq!(with.weighted, without.weighted, "seed {:?} target {:?}", seed, target);
+                assert!(with.nodes <= without.nodes);
+            }
+        }
+        // The symmetric pair has a stabiliser of order 4 and is actually reduced.
+        let with = run_from(&nb, RuleClass::Table, &[vec![-1, 0], vec![1, 0]], &[2, 3, 5, 7], SurvivalMode::Free, true, false);
+        let without = run_from(&nb, RuleClass::Table, &[vec![-1, 0], vec![1, 0]], &[2, 3, 5, 7], SurvivalMode::Free, false, false);
+        assert!(with.nodes * 2 < without.nodes, "{} vs {}", with.nodes, without.nodes);
+    }
+
+    #[test]
+    fn parity_lemma_pairs_without_a_centre_cell_stay_even() {
+        for nb in [Neighbourhood::moore(2, 1).unwrap(), Neighbourhood::moore(3, 1).unwrap(), Neighbourhood::von_neumann(4).unwrap()] {
+            let pairs = crate::bounds::interacting_pair_offsets(&nb);
+            for class in [RuleClass::Isotropic, RuleClass::Totalistic] {
+                for d in &pairs {
+                    let seed = crate::bounds::pair_seed(d);
+                    let odd = run_from(&nb, class, &seed, &[2, 3], SurvivalMode::Free, true, false);
+                    if crate::bounds::pair_has_central_cell(d) {
+                        // Not implied by the lemma (in 3D a totalistic centre shares its count with
+                        // eight other cells), but true for the square.
+                        if nb.dim == 2 {
+                            assert!(odd.solutions > 0, "{:?} {:?}", class, d);
+                        }
+                    } else {
+                        assert_eq!(odd.solutions, 0, "{:?} {:?}", class, d);
+                        assert_eq!(odd.nodes, 1);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -2,11 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::analysis::{arity_scan, complexity_profile, legacy_expression_variants};
+use crate::analysis::{
+    any_start_pairs, any_start_search, arity_scan_with, combine_profiles, complexity_profile,
+    legacy_expression_variants, PairRun,
+};
 use crate::construct::{
     prepared_prime_output_config, prime_mass_trace, BlockCodec, LocalRule, PreparedPrimeOutputRule,
     TAIL_BASE, TAIL_RESIDUES,
 };
+use crate::bounds::pair_has_central_cell;
 use crate::dashboard;
 use crate::lattice::Neighbourhood;
 use crate::mask_writer::SynchronizedPrimeOutput;
@@ -15,10 +19,11 @@ use crate::prime_worker::{
 };
 use crate::progress::Progress;
 use crate::reference::{
-    pattern_to_string, reference_states, render_evolution, verify_solution, SolutionRule,
+    pattern_to_string, reference_states_from, render_evolution, seed_config, verify_solution, SolutionRule,
 };
+use crate::rule_class::{totalistic_notation, Classifier, RuleClass};
 use crate::scheduler::{FifoResult, IntegratedCandidate, PrimeEpochPlan, RollingBatchField};
-use crate::sequences::parse_target;
+use crate::sequences::{parse_target, parse_target_from};
 use crate::state_explorer::StateExplorer;
 use crate::table_search::{search, SearchParams, SearchReport, Solution, StopReason, SurvivalMode};
 
@@ -30,7 +35,8 @@ USAGE:
 
 COMMANDS:
     search    Exact lazy rule-table search: does ANY rule (birth/survival tables over a
-              neighbourhood) produce the target set-cell counts from a single seed cell?
+              neighbourhood) produce the target set-cell counts from a single seed cell
+              (or from --seed, or from every starting configuration with --any-start)?
     profile   Smallest number of table entries a rule must consult to reproduce the first
               L terms, for every L. Flat curve = a real generator; steady growth = memorising.
     scan      Run `search` on every r-subset of the Moore neighbourhood (up to symmetry),
@@ -58,6 +64,15 @@ OPTIONS (search, profile, scan):
                                                                        [default: primes]
     --terms N               number of terms for a named sequence       [default: 10]
     --survival MODE         free | always | never                      [default: free]
+    --class CLASS           table | isotropic | totalistic: which patterns share an entry
+                            (isotropic = same after rotations/reflections, totalistic =
+                            only the number of set neighbours counts, like Life)
+                                                                       [default: table]
+    --seed CELLS            start from these cells, e.g. \"-1,0;1,0\"; the target then
+                            starts at the number of cells (primes from 2 for two cells)
+    --any-start             search from every close pair of cells; by the pair reduction
+                            this covers EVERY finite starting configuration for the
+                            target 2, 3, 5, 7, ... (primes are aligned to start at 2)
     --max-entries E         only rules consulting at most E table entries
     --no-symmetry           disable symmetry reduction (for measurements)
     --first                 stop at the first solution
@@ -134,13 +149,14 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 6] = [
+const FLAG_NAMES: [&str; 7] = [
     "no-symmetry",
     "first",
     "sequential",
     "hold",
     "verbose",
     "force",
+    "any-start",
 ];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -188,22 +204,20 @@ impl Options {
     }
 }
 
+fn parse_cell_list(list: &str) -> Result<Vec<Vec<i32>>, String> {
+    list.split(';')
+        .map(|o| {
+            o.split(',')
+                .map(|x| x.trim().parse::<i32>().map_err(|_| format!("bad offset '{}'", o)))
+                .collect::<Result<Vec<i32>, String>>()
+        })
+        .collect()
+}
+
 fn build_neighbourhood(opts: &Options) -> Result<Neighbourhood, String> {
     let dim = opts.number::<usize>("dim")?.unwrap_or(2);
     if let Some(list) = opts.values.get("offsets") {
-        let offsets = list
-            .split(';')
-            .map(|o| {
-                o.split(',')
-                    .map(|x| {
-                        x.trim()
-                            .parse::<i32>()
-                            .map_err(|_| format!("bad offset '{}'", o))
-                    })
-                    .collect::<Result<Vec<i32>, String>>()
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        return Neighbourhood::new(dim, offsets);
+        return Neighbourhood::new(dim, parse_cell_list(list)?);
     }
     match opts.text("neighbourhood", "moore").as_str() {
         "moore" => Neighbourhood::moore(dim, opts.number::<i32>("radius")?.unwrap_or(1)),
@@ -224,8 +238,23 @@ fn parse_survival(text: &str) -> Result<SurvivalMode, String> {
 fn build_params(opts: &Options) -> Result<SearchParams, String> {
     let nb = build_neighbourhood(opts)?;
     let terms = opts.number::<usize>("terms")?.unwrap_or(10);
-    let target = parse_target(&opts.text("target", "primes"), terms)?;
+    let seed = match opts.values.get("seed") {
+        Some(list) => {
+            let mut cells = parse_cell_list(list)?;
+            cells.sort();
+            cells.dedup();
+            cells
+        }
+        None => vec![],
+    };
+    if opts.flag("any-start") && !seed.is_empty() {
+        return Err("--any-start and --seed are exclusive".to_string());
+    }
+    let start = if opts.flag("any-start") { 2 } else { seed.len().max(1) };
+    let target = parse_target_from(&opts.text("target", "primes"), terms, start)?;
     let mut params = SearchParams::new(nb, target);
+    params.seed = seed;
+    params.class = RuleClass::parse(&opts.text("class", "table"))?;
     params.survival = parse_survival(&opts.text("survival", "free"))?;
     params.symmetry = !opts.flag("no-symmetry");
     params.find_first = opts.flag("first");
@@ -249,6 +278,23 @@ fn format_count(report: &SearchReport) -> String {
 }
 
 fn describe_solution(nb: &Neighbourhood, solution: &Solution, mode: SurvivalMode) -> String {
+    if solution.classifier.class() == RuleClass::Totalistic {
+        let survival = match mode {
+            SurvivalMode::Free => Some(&solution.survival[..]),
+            _ => None,
+        };
+        let mut text = format!(
+            "  totalistic rule (set-neighbour counts): {}\n",
+            totalistic_notation(nb.len(), &solution.birth, survival)
+        );
+        match mode {
+            SurvivalMode::Always => text.push_str("  survival: set cells never die\n"),
+            SurvivalMode::Never => text.push_str("  survival: set cells die after one step\n"),
+            SurvivalMode::Free => {}
+        }
+        text.push_str(&format!("  seed: {:?}\n", solution.seed));
+        return text;
+    }
     let on = |entries: &[(u64, bool)]| -> Vec<String> {
         entries
             .iter()
@@ -272,8 +318,23 @@ fn describe_solution(nb: &Neighbourhood, solution: &Solution, mode: SurvivalMode
         SurvivalMode::Always => text.push_str("  survival: set cells never die\n"),
         SurvivalMode::Never => text.push_str("  survival: set cells die after one step\n"),
     }
-    text.push_str(&format!("  symmetric images: {}\n", solution.orbit));
+    if solution.classifier.class() == RuleClass::Isotropic {
+        text.push_str("  (isotropic: each pattern shown stands for all its rotations and reflections)\n");
+    }
+    text.push_str(&format!("  symmetric images: {}   seed: {:?}\n", solution.orbit, solution.seed));
     text
+}
+
+/// Size of the rule class as "2^bits rules" (birth plus survival entries).
+fn class_space(nb: &Neighbourhood, class: RuleClass, mode: SurvivalMode) -> Result<String, String> {
+    let classifier = Classifier::new(class, nb)?;
+    let entries = classifier.birth_entries()
+        + if mode == SurvivalMode::Free { classifier.survival_entries() } else { 0 };
+    let invariance = match class {
+        RuleClass::Table => String::new(),
+        _ => format!(", the same under all {} symmetries of the neighbourhood", classifier.invariance_order()),
+    };
+    Ok(format!("2^{} rules ({} class, {} entries{})", entries, class.name(), entries, invariance))
 }
 
 /// Starts the live dashboard when `--dashboard PORT` is given and returns the shared telemetry.
@@ -303,11 +364,15 @@ fn run_search(opts: &Options) -> Result<(), String> {
     let mut params = build_params(opts)?;
     params.progress = progress.clone();
     params.label = format!(
-        "dim {} · {} neighbours · {:?} survival",
+        "dim {} · {} neighbours · {} · {:?} survival",
         params.neighbourhood.dim,
         params.neighbourhood.len(),
+        params.class.name(),
         params.survival
     );
+    if opts.flag("any-start") {
+        return run_any_start_search(opts, params, progress);
+    }
     let nb = &params.neighbourhood;
     println!(
         "neighbourhood : dim {} with {} neighbours",
@@ -316,9 +381,12 @@ fn run_search(opts: &Options) -> Result<(), String> {
     );
     println!("target        : {:?}", params.target);
     println!("survival      : {:?}", params.survival);
+    if !params.seed.is_empty() {
+        println!("seed          : {:?}", params.seed);
+    }
     println!(
-        "unrestricted rule space: 2^{} tables",
-        SearchReport::space_bits(nb.len(), params.survival)
+        "rule space    : {}",
+        class_space(nb, params.class, params.survival)?
     );
     if let Some(term) =
         crate::bounds::first_light_cone_violation(nb.dim, nb.radius() as usize, &params.target)
@@ -371,10 +439,7 @@ fn run_search(opts: &Options) -> Result<(), String> {
             n + 1,
             if verified { "ok" } else { "FAILED" }
         );
-        print!("{}", describe_solution(nb, solution, params.survival));
-        let rule = SolutionRule::new(solution, params.survival, None);
-        let states = reference_states(nb, &rule, params.target.len() - 1);
-        print!("{}", render_evolution(&states));
+        print_solution(nb, &params, solution);
     }
     hold_dashboard(opts, &progress);
     Ok(())
@@ -383,8 +448,95 @@ fn run_search(opts: &Options) -> Result<(), String> {
 fn print_solution(nb: &Neighbourhood, params: &SearchParams, solution: &Solution) {
     print!("{}", describe_solution(nb, solution, params.survival));
     let rule = SolutionRule::new(solution, params.survival, None);
-    let states = reference_states(nb, &rule, params.target.len() - 1);
+    let states = reference_states_from(nb, &rule, &seed_config(solution), params.target.len() - 1);
     print!("{}", render_evolution(&states));
+}
+
+/// `search --any-start`: every close pair, then the verdict for every starting configuration.
+fn run_any_start_search(opts: &Options, params: SearchParams, progress: Option<Arc<Progress>>) -> Result<(), String> {
+    let nb = params.neighbourhood.clone();
+    let pairs = any_start_pairs(&params);
+    println!("neighbourhood : dim {} with {} neighbours", nb.dim, nb.len());
+    println!("rule space    : {}", class_space(&nb, params.class, params.survival)?);
+    println!("target        : {:?}", params.target);
+    println!(
+        "any start     : a run 2, 3, ... from ANY configuration passes through a pair of cells closer than the reach of two neighbourhoods; {} pair shape(s) up to symmetry",
+        pairs.len()
+    );
+    println!(
+        "{:>14} {:>16} {:>9} {:>12} {:>14} {:>10}",
+        "pair offset", "seed", "matched", "solutions", "nodes", "time"
+    );
+    let symmetric = params.class != RuleClass::Table;
+    let runs = any_start_search(&params, |run: &PairRun| {
+        let r = &run.report;
+        println!(
+            "{:>14} {:>16} {:>6}/{:<2} {:>12} {:>14} {:>10.2?}{}{}",
+            format!("{:?}", run.offset),
+            format!("{:?}", run.seed),
+            r.matched_terms(),
+            params.target.len(),
+            r.solutions,
+            r.nodes,
+            r.elapsed,
+            if r.complete() { "" } else { "  (limit)" },
+            if symmetric && !pair_has_central_cell(&run.offset) {
+                "  (no centre cell: the count stays even forever)"
+            } else {
+                ""
+            }
+        );
+        if let Some(p) = &progress {
+            p.push_history(format!(
+                "pair {:?}: {} of {} terms, {} nodes{}",
+                run.offset,
+                r.matched_terms(),
+                params.target.len(),
+                r.nodes,
+                if r.complete() { "" } else { " (limit)" }
+            ));
+        }
+    })?;
+    let best = runs.iter().map(|r| r.report.matched_terms()).max().unwrap_or(0);
+    let exhaustive = runs.iter().all(|r| r.report.complete());
+    println!();
+    if exhaustive && best < params.target.len() {
+        println!(
+            "EXHAUSTIVE over every finite starting configuration: no {} rule of this neighbourhood ever has the counts {:?} in consecutive steps (longest run {} terms: {:?})",
+            params.class.name(),
+            &params.target[..(best + 1).min(params.target.len())],
+            best,
+            &params.target[..best]
+        );
+    } else if exhaustive {
+        println!("EXHAUSTIVE: some pair reproduces all {} target terms", params.target.len());
+    } else {
+        println!("partial (a limit was hit): the longest run found is {} terms, a lower bound", best);
+    }
+    if let Some(run) = runs.iter().filter(|r| !r.report.stored.is_empty()).max_by_key(|r| r.report.matched_terms()) {
+        for (n, solution) in run.report.stored.iter().enumerate() {
+            let verified = verify_solution(&nb, &params.target, solution, params.survival, 16);
+            println!();
+            println!(
+                "solution {} from pair {:?} (re-verified on 17 completions: {})",
+                n + 1,
+                run.offset,
+                if verified { "ok" } else { "FAILED" }
+            );
+            print_solution(&nb, &params, solution);
+        }
+    }
+    if let Some(p) = &progress {
+        p.finish(&format!(
+            "any-start search {}: longest run {} of {} terms over {} pair shapes",
+            if exhaustive { "exhaustive" } else { "partial" },
+            best,
+            params.target.len(),
+            runs.len()
+        ));
+    }
+    hold_dashboard(opts, &progress);
+    Ok(())
 }
 
 fn grouped(n: u64) -> String {
@@ -416,6 +568,9 @@ fn run_profile(opts: &Options) -> Result<(), String> {
     let entry_cap = opts.number::<usize>("entry-cap")?.unwrap_or(80);
     let attempt_limit = params.time_limit.take();
     params.max_entries = None;
+    if opts.flag("any-start") {
+        return run_any_start_profile(opts, params, entry_cap, attempt_limit, progress);
+    }
     let nb = params.neighbourhood.clone();
     println!(
         "profile: dim {} with {} neighbours, survival {:?}, target {:?}",
@@ -502,6 +657,63 @@ fn run_profile(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `profile --any-start`: the profile of every close pair and their minimum, which is the minimal
+/// description length over every finite starting configuration (the pair itself is one offset).
+fn run_any_start_profile(
+    opts: &Options,
+    params: SearchParams,
+    entry_cap: usize,
+    attempt_limit: Option<Duration>,
+    progress: Option<Arc<Progress>>,
+) -> Result<(), String> {
+    let nb = params.neighbourhood.clone();
+    let last = params.target.len();
+    println!(
+        "any-start profile: dim {} with {} neighbours, {} class, survival {:?}, target {:?}",
+        nb.dim,
+        nb.len(),
+        params.class.name(),
+        params.survival,
+        params.target
+    );
+    let mut per_pair = vec![];
+    for offset in any_start_pairs(&params) {
+        let mut pair = params.clone();
+        pair.seed = crate::bounds::pair_seed(&offset);
+        pair.label = format!("{} · pair {:?}", params.label, offset);
+        let mut line = format!("pair {:>12}:", format!("{:?}", offset));
+        let rows = complexity_profile(&pair, 2, last, entry_cap, attempt_limit, |row| match row.min_entries {
+            Some(m) => line.push_str(&format!(" {}", m)),
+            None => line.push_str(&format!(" >{}", row.ruled_out_below.saturating_sub(1))),
+        })?;
+        println!("{}", line);
+        if let Some(p) = &progress {
+            p.push_history(line.clone());
+        }
+        per_pair.push(rows);
+    }
+    println!();
+    println!("minimal entries over every starting configuration (L = terms of {:?}):", params.target);
+    println!("{:>4} {:>6} {:>12}", "L", "term", "min entries");
+    for (terms, best, exact) in combine_profiles(&per_pair) {
+        println!(
+            "{:>4} {:>6} {:>12}",
+            terms,
+            params.target[terms - 1],
+            match best {
+                Some(b) if exact => b.to_string(),
+                Some(b) => format!("<= {}", b),
+                None => "?".to_string(),
+            }
+        );
+    }
+    if let Some(p) = &progress {
+        p.finish("any-start profile finished");
+    }
+    hold_dashboard(opts, &progress);
+    Ok(())
+}
+
 fn run_scan(opts: &Options) -> Result<(), String> {
     let progress = start_dashboard(opts)?;
     let mut params = build_params(opts)?;
@@ -529,10 +741,15 @@ fn run_scan(opts: &Options) -> Result<(), String> {
         );
     }
 
-    let summaries = arity_scan(
+    let any_start = opts.flag("any-start");
+    if any_start {
+        println!("every class is searched from each of its close pairs: the verdicts hold for every finite starting configuration");
+    }
+    let summaries = arity_scan_with(
         &params,
         min_arity..=max_arity,
         universe_radius,
+        any_start,
         progress.clone(),
         |class| {
             if verbose {
@@ -591,8 +808,10 @@ fn run_scan(opts: &Options) -> Result<(), String> {
             )
         } else if s.best_matched < total {
             format!(
-                "DEAD: no rule with at most {} neighbours generates more than {} terms",
-                s.arity, s.best_matched
+                "DEAD: no rule with at most {} neighbours generates more than {} terms{}",
+                s.arity,
+                s.best_matched,
+                if any_start { " from any start" } else { "" }
             )
         } else {
             format!("alive: some rule reproduces all {} target terms", total)

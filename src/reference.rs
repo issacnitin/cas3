@@ -8,8 +8,10 @@
 */
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crate::lattice::Neighbourhood;
+use crate::rule_class::Classifier;
 use crate::table_search::{Solution, SurvivalMode};
 
 pub type Config = BTreeSet<Vec<i32>>;
@@ -20,10 +22,16 @@ pub trait RuleFn {
     fn survive(&self, mask: u64) -> bool;
 }
 
+#[cfg(test)]
 pub fn origin_config(dim: usize) -> Config {
     let mut config = Config::new();
     config.insert(vec![0; dim]);
     config
+}
+
+/// The seed a solution was found from.
+pub fn seed_config(solution: &Solution) -> Config {
+    solution.seed.iter().cloned().collect()
 }
 
 fn shifted(cell: &[i32], offset: &[i32], sign: i32) -> Vec<i32> {
@@ -59,8 +67,19 @@ pub fn reference_step<R: RuleFn + ?Sized>(nb: &Neighbourhood, rule: &R, current:
 }
 
 /// Configurations at t = 0..=steps starting from a single set cell at the origin.
+#[cfg(test)]
 pub fn reference_states<R: RuleFn + ?Sized>(nb: &Neighbourhood, rule: &R, steps: usize) -> Vec<Config> {
-    let mut states = vec![origin_config(nb.dim)];
+    reference_states_from(nb, rule, &origin_config(nb.dim), steps)
+}
+
+/// Configurations at t = 0..=steps starting from `start`.
+pub fn reference_states_from<R: RuleFn + ?Sized>(
+    nb: &Neighbourhood,
+    rule: &R,
+    start: &Config,
+    steps: usize,
+) -> Vec<Config> {
+    let mut states = vec![start.clone()];
     for _ in 0..steps {
         let next = reference_step(nb, rule, states.last().unwrap());
         states.push(next);
@@ -74,8 +93,19 @@ pub fn reference_counts<R: RuleFn + ?Sized>(nb: &Neighbourhood, rule: &R, steps:
 }
 
 /// True when the set-cell counts at t = 0, 1, ... equal `target`; stops at the first mismatch.
+#[cfg(test)]
 pub fn reference_matches<R: RuleFn + ?Sized>(nb: &Neighbourhood, rule: &R, target: &[usize]) -> bool {
-    let mut current = origin_config(nb.dim);
+    reference_matches_from(nb, rule, &origin_config(nb.dim), target)
+}
+
+/// As `reference_matches`, starting from `start`.
+pub fn reference_matches_from<R: RuleFn + ?Sized>(
+    nb: &Neighbourhood,
+    rule: &R,
+    start: &Config,
+    target: &[usize],
+) -> bool {
+    let mut current = start.clone();
     if target.first() != Some(&current.len()) {
         return false;
     }
@@ -97,11 +127,13 @@ pub fn splitmix64(mut x: u64) -> u64 {
 }
 
 /// A solution's assigned entries; unassigned patterns are 0, or pseudo-random for a given seed.
+/// Patterns are looked up by their class key, so every completion stays inside the rule class.
 pub struct SolutionRule {
     birth: HashMap<u64, bool>,
     survive: HashMap<u64, bool>,
     mode: SurvivalMode,
     seed: Option<u64>,
+    classifier: Arc<Classifier>,
 }
 
 impl SolutionRule {
@@ -111,6 +143,7 @@ impl SolutionRule {
             survive: solution.survival.iter().copied().collect(),
             mode,
             seed,
+            classifier: solution.classifier.clone(),
         }
     }
 
@@ -124,14 +157,16 @@ impl SolutionRule {
 
 impl RuleFn for SolutionRule {
     fn birth(&self, mask: u64) -> bool {
-        self.birth.get(&mask).copied().unwrap_or_else(|| self.fill(1, mask))
+        let key = self.classifier.key(mask);
+        self.birth.get(&key).copied().unwrap_or_else(|| self.fill(1, key))
     }
 
     fn survive(&self, mask: u64) -> bool {
+        let key = self.classifier.key(mask);
         match self.mode {
             SurvivalMode::Always => true,
             SurvivalMode::Never => false,
-            SurvivalMode::Free => self.survive.get(&mask).copied().unwrap_or_else(|| self.fill(2, mask)),
+            SurvivalMode::Free => self.survive.get(&key).copied().unwrap_or_else(|| self.fill(2, key)),
         }
     }
 }
@@ -145,10 +180,12 @@ pub fn verify_solution(
     mode: SurvivalMode,
     completions: u64,
 ) -> bool {
-    if !reference_matches(nb, &SolutionRule::new(solution, mode, None), target) {
+    let start = seed_config(solution);
+    if !reference_matches_from(nb, &SolutionRule::new(solution, mode, None), &start, target) {
         return false;
     }
-    (0..completions).all(|seed| reference_matches(nb, &SolutionRule::new(solution, mode, Some(seed + 1)), target))
+    (0..completions)
+        .all(|seed| reference_matches_from(nb, &SolutionRule::new(solution, mode, Some(seed + 1)), &start, target))
 }
 
 pub fn pattern_to_string(nb: &Neighbourhood, mask: u64) -> String {

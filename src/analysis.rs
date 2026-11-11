@@ -6,15 +6,88 @@
 *   flatten; a rule that merely memorises the prefix needs more entries for every extra term.
 * - arity_scan: every rule that depends on at most r of the neighbours, over all r-subsets of the
 *   Moore neighbourhood up to lattice symmetry.
+* - any_start_search: the same search from every close pair of cells (see bounds.rs), which by the
+*   pair reduction covers every finite starting configuration for targets 2, 3, ...
 * - legacy_expression_variants: size of the original expression-tree search space.
 */
 
 use std::time::{Duration, Instant};
 
-use crate::lattice::{moore_offsets, subset_orbit_representatives_in, Neighbourhood};
+use crate::bounds::{interacting_pair_offsets, pair_representatives, pair_seed};
+use crate::lattice::{moore_offsets, subset_orbit_representatives_in, Neighbourhood, SymmetryGroup};
 use crate::progress::Progress;
-use crate::table_search::{search, SearchParams, Solution};
+use crate::rule_class::RuleClass;
+use crate::table_search::{search, SearchParams, SearchReport, Solution};
 use std::sync::Arc;
+
+/// One close pair of an any-start run.
+#[derive(Debug, Clone)]
+pub struct PairRun {
+    pub offset: Vec<i32>,
+    pub seed: Vec<Vec<i32>>,
+    pub report: SearchReport,
+}
+
+/// Close pairs to search for `base`, one per orbit of the symmetries that relate rules of the class
+/// (all symmetries of the neighbourhood for symmetric classes; none for a table without symmetry).
+pub fn any_start_pairs(base: &SearchParams) -> Vec<Vec<i32>> {
+    let nb = &base.neighbourhood;
+    let group = if base.symmetry || base.class != RuleClass::Table {
+        SymmetryGroup::preserving(nb)
+    } else {
+        SymmetryGroup::trivial()
+    };
+    pair_representatives(&interacting_pair_offsets(nb), &group)
+}
+
+/// Runs `base` (whose target must start with 2) from every close pair. If every run is exhaustive,
+/// the longest prefix over the pairs is exact for every finite starting configuration.
+pub fn any_start_search(base: &SearchParams, mut on_pair: impl FnMut(&PairRun)) -> Result<Vec<PairRun>, String> {
+    if base.target.first() != Some(&2) {
+        return Err("an any-start run needs a target that starts with 2 (two seed cells)".to_string());
+    }
+    let mut runs = vec![];
+    for offset in any_start_pairs(base) {
+        let mut params = base.clone();
+        params.seed = pair_seed(&offset);
+        params.label = format!("{} · pair {:?}", base.label, offset);
+        let report = search(&params)?;
+        let run = PairRun { offset, seed: params.seed.clone(), report };
+        on_pair(&run);
+        runs.push(run);
+    }
+    Ok(runs)
+}
+
+/// Combines per-pair profiles: for each prefix length the minimum over the pairs and whether it is
+/// exact (every other pair is known to need at least as many entries).
+pub fn combine_profiles(per_pair: &[Vec<ProfileRow>]) -> Vec<(usize, Option<usize>, bool)> {
+    let last = per_pair.iter().flat_map(|rows| rows.iter().map(|r| r.terms)).max().unwrap_or(0);
+    let mut out = vec![];
+    for terms in 2..=last {
+        // Lower bound of each pair at this length (entries are non-decreasing in the length).
+        let mut best: Option<usize> = None;
+        let mut floor = usize::MAX;
+        for rows in per_pair {
+            match rows.iter().find(|r| r.terms == terms) {
+                Some(row) => {
+                    if let Some(m) = row.min_entries {
+                        best = Some(best.map_or(m, |b: usize| b.min(m)));
+                    } else {
+                        floor = floor.min(row.ruled_out_below);
+                    }
+                }
+                None => {
+                    let below = rows.last().map(|r| r.ruled_out_below).unwrap_or(0);
+                    floor = floor.min(below);
+                }
+            }
+        }
+        let exact = best.map_or(false, |b| b <= floor);
+        out.push((terms, best, exact));
+    }
+    out
+}
 
 #[derive(Debug, Clone)]
 pub struct ProfileRow {
@@ -120,10 +193,24 @@ pub struct ScanSummary {
 /// `universe_radius` (one per symmetry orbit) for each arity in `arities`. A rule that depends on
 /// fewer neighbours is covered by any superset, so the result for arity r holds for "at most r
 /// neighbours chosen from that universe".
+#[cfg(test)]
 pub fn arity_scan(
     base: &SearchParams,
     arities: std::ops::RangeInclusive<usize>,
     universe_radius: i32,
+    progress: Option<Arc<Progress>>,
+    on_class: impl FnMut(&ScanClass),
+) -> Result<Vec<ScanSummary>, String> {
+    arity_scan_with(base, arities, universe_radius, false, progress, on_class)
+}
+
+/// `arity_scan`; with `any_start` every class is searched from each of its close pairs (the target
+/// must then start with 2), which covers every finite starting configuration.
+pub fn arity_scan_with(
+    base: &SearchParams,
+    arities: std::ops::RangeInclusive<usize>,
+    universe_radius: i32,
+    any_start: bool,
     progress: Option<Arc<Progress>>,
     mut on_class: impl FnMut(&ScanClass),
 ) -> Result<Vec<ScanSummary>, String> {
@@ -155,17 +242,32 @@ pub fn arity_scan(
                     representatives.len() as u64,
                 );
             }
-            let report = search(&params)?;
-            let class = ScanClass {
-                arity,
-                index,
-                classes_in_arity: representatives.len(),
-                offsets: nb.offsets.clone(),
-                matched_terms: report.matched_terms(),
-                solutions: report.solutions,
-                nodes: report.nodes,
-                complete: report.complete(),
-                elapsed: report.elapsed,
+            let class = if any_start {
+                let runs = any_start_search(&params, |_| {})?;
+                ScanClass {
+                    arity,
+                    index,
+                    classes_in_arity: representatives.len(),
+                    offsets: nb.offsets.clone(),
+                    matched_terms: runs.iter().map(|r| r.report.matched_terms()).max().unwrap_or(0),
+                    solutions: runs.iter().map(|r| r.report.solutions).sum(),
+                    nodes: runs.iter().map(|r| r.report.nodes).sum(),
+                    complete: runs.iter().all(|r| r.report.complete()),
+                    elapsed: runs.iter().map(|r| r.report.elapsed).sum(),
+                }
+            } else {
+                let report = search(&params)?;
+                ScanClass {
+                    arity,
+                    index,
+                    classes_in_arity: representatives.len(),
+                    offsets: nb.offsets.clone(),
+                    matched_terms: report.matched_terms(),
+                    solutions: report.solutions,
+                    nodes: report.nodes,
+                    complete: report.complete(),
+                    elapsed: report.elapsed,
+                }
             };
             summary.nodes += class.nodes;
             summary.best_matched = summary.best_matched.max(class.matched_terms);
@@ -266,6 +368,122 @@ mod test {
         // Orbits of single offsets / pairs of offsets in the 5x5 block under the symmetries of the square.
         assert_eq!(summaries.iter().map(|s| s.classes).collect::<Vec<_>>(), vec![5, 44]);
         assert!(summaries.iter().all(|s| s.with_solutions == 0 && s.best_matched == 3));
+    }
+
+    /// End-to-end check of the pair reduction: simulate every rule of a small class from every small
+    /// starting configuration, find the longest run 2, 3, 5, 7, ... at ANY time (after any transient),
+    /// and compare with the longest prefix the any-start search finds from close pairs alone.
+    fn brute_force_longest_prime_run(nb: &Neighbourhood, class: RuleClass, window: &[(i32, i32)], max_cells: usize, steps: usize) -> usize {
+        use crate::rule_class::Classifier;
+        use std::collections::{HashMap, HashSet};
+        let classifier = Classifier::new(class, nb).unwrap();
+        let k = nb.len();
+        let mut birth_keys: Vec<u64> = (1..1u64 << k).map(|m| classifier.key(m)).collect();
+        birth_keys.sort_unstable();
+        birth_keys.dedup();
+        let mut survive_keys: Vec<u64> = (0..1u64 << k).map(|m| classifier.key(m)).collect();
+        survive_keys.sort_unstable();
+        survive_keys.dedup();
+        let birth_index: HashMap<u64, usize> = birth_keys.iter().enumerate().map(|(i, &key)| (key, i)).collect();
+        let survive_index: HashMap<u64, usize> =
+            survive_keys.iter().enumerate().map(|(i, &key)| (key, birth_keys.len() + i)).collect();
+        let bits = birth_keys.len() + survive_keys.len();
+        let offsets: Vec<(i32, i32)> = nb.offsets.iter().map(|o| (o[0], *o.get(1).unwrap_or(&0))).collect();
+        let primes = primes_target(steps + 2)[1..].to_vec();
+        let mut configs: Vec<Vec<(i32, i32)>> = vec![];
+        for subset in 1u32..(1 << window.len()) {
+            if subset.count_ones() as usize <= max_cells {
+                configs.push(window.iter().enumerate().filter(|(i, _)| subset >> i & 1 == 1).map(|(_, &c)| c).collect());
+            }
+        }
+        let mut best = 0;
+        for rule in 0..(1u64 << bits) {
+            for config in &configs {
+                let mut live: HashSet<(i32, i32)> = config.iter().copied().collect();
+                let mut counts = vec![live.len()];
+                for _ in 0..steps {
+                    let mut candidates: HashSet<(i32, i32)> = live.clone();
+                    for &(x, y) in &live {
+                        for &(dx, dy) in &offsets {
+                            candidates.insert((x - dx, y - dy));
+                        }
+                    }
+                    let mut next = HashSet::new();
+                    for &(x, y) in &candidates {
+                        let mut mask = 0u64;
+                        for (j, &(dx, dy)) in offsets.iter().enumerate() {
+                            if live.contains(&(x + dx, y + dy)) {
+                                mask |= 1 << j;
+                            }
+                        }
+                        let key = classifier.key(mask);
+                        let on = if live.contains(&(x, y)) {
+                            rule >> survive_index[&key] & 1 == 1
+                        } else {
+                            mask != 0 && rule >> birth_index[&key] & 1 == 1
+                        };
+                        if on {
+                            next.insert((x, y));
+                        }
+                    }
+                    live = next;
+                    counts.push(live.len());
+                    if live.is_empty() || live.len() > 200 {
+                        break;
+                    }
+                }
+                for start in 0..counts.len() {
+                    let run = counts[start..].iter().zip(&primes).take_while(|(a, b)| a == b).count();
+                    best = best.max(run);
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn any_start_search_equals_brute_force_over_starting_configurations() {
+        let cases: Vec<(Neighbourhood, RuleClass, Vec<(i32, i32)>, usize, usize)> = vec![
+            (Neighbourhood::moore(1, 1).unwrap(), RuleClass::Table, (-4..=4).map(|x| (x, 0)).collect(), 9, 14),
+            (Neighbourhood::moore(1, 2).unwrap(), RuleClass::Totalistic, (-4..=4).map(|x| (x, 0)).collect(), 9, 14),
+            (
+                Neighbourhood::von_neumann(2).unwrap(),
+                RuleClass::Totalistic,
+                (-1..=1).flat_map(|x| (-1..=1).map(move |y| (x, y))).collect(),
+                3,
+                8,
+            ),
+        ];
+        for (nb, class, window, max_cells, steps) in cases {
+            let brute = brute_force_longest_prime_run(&nb, class, &window, max_cells, steps);
+            let mut base = SearchParams::new(nb.clone(), primes_target(steps + 2)[1..].to_vec());
+            base.class = class;
+            base.parallel = false;
+            base.store_limit = 0;
+            let runs = any_start_search(&base, |_| {}).unwrap();
+            assert!(runs.iter().all(|r| r.report.complete()));
+            let best = runs.iter().map(|r| r.report.matched_terms()).max().unwrap();
+            assert_eq!(best, brute, "dim {} {:?}", nb.dim, class);
+            assert!(best >= 2);
+        }
+    }
+
+    #[test]
+    fn combined_profile_takes_the_minimum_and_knows_when_it_is_exact() {
+        let row = |terms, min_entries: Option<usize>, ruled_out_below| ProfileRow {
+            terms,
+            min_entries,
+            ruled_out_below,
+            nodes: 0,
+            elapsed: Duration::ZERO,
+            solution: None,
+        };
+        let a = vec![row(2, Some(5), 5), row(3, Some(9), 9), row(4, None, 12)];
+        let b = vec![row(2, Some(4), 4), row(3, None, 7)];
+        assert_eq!(
+            combine_profiles(&[a, b]),
+            vec![(2, Some(4), true), (3, Some(9), false), (4, None, false)]
+        );
     }
 
     #[test]
