@@ -21,6 +21,23 @@
 * rule is) and d has an odd coordinate, the midpoint of the pair is not a cell. The reflection through
 * the midpoint maps the pair to itself and commutes with the rule, so every later configuration is
 * symmetric under it; it fixes no cell, so the count stays even forever and never reaches 3.
+*
+* Symmetric rules in every dimension (checked by src/dimension_sweep.rs up to dimension 21):
+*
+* von Neumann, isotropic, any d >= 2: the only even offsets in N0 - N0 are +-2e, so the pair is
+* {-e1, e1}. Each seed sees nothing, the centre sees both axis-1 neighbours, and the other 4d - 2
+* cells next to a seed see one neighbour on one axis, all one isotropic class. A count of 3 forces
+* seeds kept, centre born, and no birth for "one neighbour on one axis". The line {-e1, 0, e1} then
+* gives no unset cell two set neighbours (a cell next to two line cells is the centre), so every
+* candidate birth is of the forbidden class: the count stays at most 3 and never reaches 5.
+*
+* Moore radius 1, totalistic (Life-like), any d >= 3: the pair is {-u, u} with u in {-1,0,1}^d
+* having m nonzero coordinates. The seeds see 0 set cells, the 3^(d-m) cells with x_i = 0 wherever
+* u_i != 0 see 2, and at least 34 cells see 1. Count 3 needs either m = d (seeds kept, centre
+* born: the diagonal line {-w, 0, w}) or m = d - 1 (seeds die, the axis line {-e, 0, e} born),
+* and in both cases "2 neighbours" gives birth and "1 neighbour" does not. The next step then
+* births every unset cell that sees exactly two line cells: 2(2^d - 2) >= 12 cells next to the
+* diagonal line, 2(3^(d-1) - 1) >= 16 next to the axis line. The count overshoots 5.
 */
 
 use crate::lattice::{Neighbourhood, SymmetryGroup};
@@ -95,6 +112,38 @@ pub fn pair_representatives_linear(offsets: &[Vec<i32>], matrices: &[Vec<Vec<i32
                 best = best.max(image).max(negated);
             }
             best
+        })
+        .collect();
+    reps.sort();
+    reps.dedup();
+    reps
+}
+
+/// True when every coordinate permutation and sign change maps the neighbourhood onto itself (Moore
+/// and von Neumann neighbourhoods): the generators are a sign flip of axis 0 and the swaps (0 i).
+pub fn is_hyperoctahedral(nb: &Neighbourhood) -> bool {
+    let set: std::collections::HashSet<&Vec<i32>> = nb.offsets.iter().collect();
+    nb.offsets.iter().all(|o| {
+        let mut flipped = o.clone();
+        flipped[0] = -flipped[0];
+        set.contains(&flipped)
+            && (1..nb.dim).all(|i| {
+                let mut swapped = o.clone();
+                swapped.swap(0, i);
+                set.contains(&swapped)
+            })
+    })
+}
+
+/// Pair representatives under every coordinate permutation and sign change, in any dimension:
+/// the absolute values sorted from largest to smallest.
+pub fn pair_representatives_hyperoctahedral(offsets: &[Vec<i32>]) -> Vec<Vec<i32>> {
+    let mut reps: Vec<Vec<i32>> = offsets
+        .iter()
+        .map(|d| {
+            let mut a: Vec<i32> = d.iter().map(|x| x.abs()).collect();
+            a.sort_unstable_by(|x, y| y.cmp(x));
+            a
         })
         .collect();
     reps.sort();
@@ -197,6 +246,20 @@ mod test {
             interacting_pair_offsets(&tee),
             vec![vec![0, 1], vec![1, -1], vec![1, 0], vec![1, 1], vec![2, 0]]
         );
+    }
+
+    #[test]
+    fn closed_form_pair_reduction_matches_the_group_one() {
+        for nb in [Neighbourhood::moore(2, 1).unwrap(), Neighbourhood::moore(3, 1).unwrap(), Neighbourhood::von_neumann(4).unwrap(), Neighbourhood::von_neumann(5).unwrap()] {
+            assert!(is_hyperoctahedral(&nb));
+            let pairs = interacting_pair_offsets(&nb);
+            let by_group = pair_representatives(&pairs, &SymmetryGroup::preserving(&nb));
+            let closed = pair_representatives_hyperoctahedral(&pairs);
+            assert_eq!(by_group.len(), closed.len(), "dim {}", nb.dim);
+        }
+        let tee = Neighbourhood::new(2, vec![vec![1, 0], vec![-1, 0], vec![0, 1]]).unwrap();
+        assert!(!is_hyperoctahedral(&tee));
+        assert_eq!(pair_representatives_hyperoctahedral(&interacting_pair_offsets(&Neighbourhood::von_neumann(9).unwrap())).len(), 3);
     }
 
     #[test]

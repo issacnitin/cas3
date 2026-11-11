@@ -52,6 +52,8 @@ COMMANDS:
     rolling   Recurrently classify stride-partitioned batches under one local CA rule
     epoch     Print the conservative dyadic coverage and population resource check
     mask      Decode one binary split count and commit a synchronized prime output
+    sweep     Symmetric families (Life-like, von Neumann totalistic and isotropic) in any
+              dimension up to 21, from every starting pattern: the longest run of primes
     space     Compare the legacy search-space size with the new one, per dimension
     legacy    The original expression-tree enumeration (only practical in dimension 1)
     help      Show this message
@@ -137,6 +139,13 @@ OPTIONS (mask):
     --old-residue R         current tail payload residue, 0..3                    [default: 1]
     --new-residue R         next tail payload residue, 0..3                       [default: 3]
     --max-steps N           local CA-step safety limit                     [default: 100000]
+
+OPTIONS (sweep):
+    --min-dim N  --max-dim N   dimensions to sweep                     [default: 2..8]
+    --family F              life | life2 | vn | vn-iso | all           [default: all]
+    --terms N               primes in the target, from 2               [default: 12]
+    --node-limit N          search nodes per family and dimension      [default: 50000000]
+    --max-offsets N         skip Moore families with more neighbours   [default: 200000]
 
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
@@ -775,7 +784,17 @@ fn run_any_start_profile(
 
 fn run_scan(opts: &Options) -> Result<(), String> {
     let progress = start_dashboard(opts)?;
-    let mut params = build_params(opts)?;
+    // The scan replaces the neighbourhood by subsets of the Moore block, so the base only needs the
+    // dimension; the full Moore neighbourhood may be too large (80 neighbours in 4D).
+    let mut base_values = opts.values.clone();
+    if !base_values.contains_key("offsets") {
+        base_values.insert("neighbourhood".to_string(), "vonneumann".to_string());
+    }
+    let base_opts = Options {
+        values: base_values,
+        flags: opts.flags.clone(),
+    };
+    let mut params = build_params(&base_opts)?;
     params.store_limit = 0;
     params.label = format!(
         "scan · dim {} · {:?} survival",
@@ -913,6 +932,81 @@ fn run_scan(opts: &Options) -> Result<(), String> {
         });
     }
     hold_dashboard(opts, &progress);
+    Ok(())
+}
+
+/// `sweep`: symmetric families from every starting pattern, dimension by dimension.
+fn run_sweep(opts: &Options) -> Result<(), String> {
+    use crate::dimension_sweep::{sweep, Family, MAX_SWEEP_DIM};
+    let min_dim = opts.number::<usize>("min-dim")?.unwrap_or(2);
+    let max_dim = opts
+        .number::<usize>("max-dim")?
+        .unwrap_or(8)
+        .min(MAX_SWEEP_DIM);
+    let terms = opts.number::<usize>("terms")?.unwrap_or(12);
+    let node_limit = opts.number::<u64>("node-limit")?.unwrap_or(50_000_000);
+    let max_offsets = opts.number::<usize>("max-offsets")?.unwrap_or(200_000);
+    let families: Vec<Family> = match opts.text("family", "all").as_str() {
+        "life" => vec![Family::MooreTotalistic(1)],
+        "life2" => vec![Family::MooreTotalistic(2)],
+        "vn" => vec![Family::VonNeumannTotalistic],
+        "vn-iso" => vec![Family::VonNeumannIsotropic],
+        "all" => vec![
+            Family::MooreTotalistic(1),
+            Family::MooreTotalistic(2),
+            Family::VonNeumannTotalistic,
+            Family::VonNeumannIsotropic,
+        ],
+        other => {
+            return Err(format!(
+                "unknown family '{}' (life | life2 | vn | vn-iso | all)",
+                other
+            ))
+        }
+    };
+    let target = parse_target_from("primes", terms, 2)?;
+    println!(
+        "sweep: symmetric families from EVERY finite starting pattern (centred pairs, see bounds.rs), target {:?}",
+        target
+    );
+    println!(
+        "{:>4}  {:<30} {:>14} {:>6} {:>8}  {:<26} {:>12} {:>10}",
+        "dim", "family", "entries", "pairs", "run", "longest run of primes", "nodes", "time"
+    );
+    for dim in min_dim..=max_dim {
+        for &family in &families {
+            let neighbours = ((2 * match family {
+                Family::MooreTotalistic(r) => r,
+                _ => 1,
+            } + 1) as f64)
+                .powi(dim as i32);
+            if matches!(family, Family::MooreTotalistic(_)) && neighbours > max_offsets as f64 {
+                continue;
+            }
+            let result = sweep(family, dim, &target, node_limit)?;
+            let shown: Vec<String> = target[..result.best_run]
+                .iter()
+                .map(|p| p.to_string())
+                .collect();
+            println!(
+                "{:>4}  {:<30} {:>14} {:>6} {:>5}/{:<2}  {:<26} {:>12} {:>10.2?}{}",
+                result.dim,
+                result.family.name(),
+                result.entries,
+                result.pairs,
+                result.best_run,
+                result.terms_checked,
+                shown.join(","),
+                result.nodes,
+                result.elapsed,
+                if result.complete {
+                    ""
+                } else {
+                    "  (node limit: lower bound)"
+                }
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1330,6 +1424,7 @@ pub fn run() {
         "epoch" => parse_options(&args[1..]).and_then(|o| run_epoch(&o)),
         "mask" => parse_options(&args[1..]).and_then(|o| run_mask(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
+        "sweep" => parse_options(&args[1..]).and_then(|o| run_sweep(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {
             print!("{}", USAGE);

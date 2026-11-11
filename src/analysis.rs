@@ -13,7 +13,11 @@
 
 use std::time::{Duration, Instant};
 
-use crate::bounds::{interacting_pair_offsets, pair_representatives, pair_representatives_linear, pair_seed};
+use crate::bounds::{
+    interacting_pair_offsets, is_hyperoctahedral, pair_representatives, pair_representatives_hyperoctahedral,
+    pair_representatives_linear, pair_seed,
+};
+use crate::lattice::MAX_SYMMETRY_DIM;
 use crate::lattice::{moore_offsets, subset_orbit_representatives_in, Neighbourhood, SymmetryGroup};
 use crate::progress::Progress;
 use crate::rule_class::RuleClass;
@@ -35,7 +39,11 @@ pub fn any_start_pairs(base: &SearchParams) -> Vec<Vec<i32>> {
     if base.class != RuleClass::Table && !base.symmetry_matrices.is_empty() {
         return pair_representatives_linear(&interacting_pair_offsets(nb), &base.symmetry_matrices);
     }
-    let group = if base.symmetry || base.class != RuleClass::Table {
+    let reduce = base.symmetry || base.class != RuleClass::Table;
+    if reduce && nb.dim > MAX_SYMMETRY_DIM && is_hyperoctahedral(nb) {
+        return pair_representatives_hyperoctahedral(&interacting_pair_offsets(nb));
+    }
+    let group = if reduce {
         SymmetryGroup::preserving(nb)
     } else {
         SymmetryGroup::trivial()
@@ -468,6 +476,47 @@ mod test {
             let best = runs.iter().map(|r| r.report.matched_terms()).max().unwrap();
             assert_eq!(best, brute, "dim {} {:?}", nb.dim, class);
             assert!(best >= 2);
+        }
+    }
+
+    #[test]
+    fn von_neumann_tables_gain_nothing_from_more_dimensions() {
+        // Every rule on the axis neighbours, from every starting pattern: the longest run is
+        // 2, 3, 5, ..., 23 in every dimension, and each extra dimension costs exactly two more table
+        // entries for every prefix.
+        let mut previous: Option<Vec<usize>> = None;
+        for dim in 2..=5 {
+            let mut base = SearchParams::new(Neighbourhood::von_neumann(dim).unwrap(), primes_target(15)[1..].to_vec());
+            base.parallel = false;
+            base.store_limit = 0;
+            let runs = any_start_search(&base, |_| {}).unwrap();
+            assert!(runs.iter().all(|r| r.report.complete()));
+            assert_eq!(runs.iter().map(|r| r.report.matched_terms()).max(), Some(9), "{}D", dim);
+
+            let mut profiled = base.clone();
+            profiled.target.truncate(7);
+            let per_pair: Vec<Vec<ProfileRow>> = any_start_pairs(&profiled)
+                .iter()
+                .map(|offset| {
+                    let mut pair = profiled.clone();
+                    pair.seed = pair_seed(offset);
+                    complexity_profile(&pair, 2, 7, 60, None, |_| {}).unwrap()
+                })
+                .collect();
+            let combined: Vec<usize> = combine_profiles(&per_pair)
+                .into_iter()
+                .map(|(_, best, exact)| {
+                    assert!(exact);
+                    best.unwrap()
+                })
+                .collect();
+            if let Some(before) = &previous {
+                let shifted: Vec<usize> = before.iter().map(|m| m + 2).collect();
+                assert_eq!(combined, shifted, "{}D", dim);
+            } else {
+                assert_eq!(combined, vec![6, 8, 10, 14, 18, 19]);
+            }
+            previous = Some(combined);
         }
     }
 

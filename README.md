@@ -273,10 +273,53 @@ This is what memorising a sieve looks like. A fixed rule can build in a wheel fo
 primes, and each new prime square then needs new entries. The hexagonal rules that reach 17
 continue with 21, not 19.
 
+### Higher dimensions
+
+More dimensions give a rule more neighbours and more room. Each family was pushed up in dimension
+until it was settled, from every starting pattern.
+
+**Symmetric families, every dimension.** `sweep` (`src/dimension_sweep.rs`) is an independent
+lazy search that computes the class key directly: neighbour count for totalistic rules, and, for
+isotropic von Neumann rules, how many axes have one or both neighbours set. It needs no 64-bit
+pattern masks, so it reaches dimension 21. It agrees with the main engine wherever both run.
+
+| family | dimensions swept | longest run, every start |
+|---|---|---|
+| Life-like (Moore radius 1, totalistic) | 2 | 2, 3, 5 |
+| Life-like (Moore radius 1, totalistic) | 3–11 (up to 354,293 entries) | 2, 3 |
+| Moore radius 2, totalistic | 2–7 | 2, 3 |
+| von Neumann, totalistic and isotropic | 2–21 | 2, 3 |
+
+Two of these are theorems for every dimension (proofs in `src/bounds.rs`):
+
+* **Isotropic von Neumann rules, any \(d\ge 2\).** Reaching 3 forces the three-cell line
+  \(\{-e_1,0,e_1\}\) and forbids births on "one neighbour on one axis". Every cell next to that
+  line is of that kind, so the count never reaches 5.
+* **Life-like rules, any \(d\ge 3\).** Reaching 3 forces a three-cell line and births on 2
+  neighbours. The next step then gives birth to at least 12 cells at once, overshooting 5.
+
+So more dimensions make symmetric rules worse: they tie more cells together.
+
+**Unrestricted tables, more dimensions.**
+
+* Rules on the axis neighbours (von Neumann tables, every rule, every start) reproduce at most
+  2, 3, 5, …, 23 in every dimension from 2 to 10. That is the wheel of six again.
+* Their minimal rule size is the same curve shifted by exactly two entries per dimension: 6, 8,
+  10, 14, 18, 19, 23 entries for 2 … 19 in 2D, then +2, +4, +6, +8 in 3D–6D (exact, tested
+  up to 5D).
+* Rules that read at most \(r\) neighbours of the \(3^d\) block (`scan --any-start`, exhaustive)
+  reproduce 2, 3, 5 and 12 primes for \(r=1,\dots,4\) in 2D, 3D, 4D and 5D alike (51,121
+  neighbour classes at \(r=4\) in 5D). Capacity depends on how many neighbours a rule reads,
+  not on the dimension they come from.
+* Long fits are easy to find in large classes; they just aren't generators. An unrestricted 2D
+  table was tuned to 72 primes (2 … 359) from a pair within two minutes. In 3D the search reached
+  27 primes in ten minutes, because each step has more patterns to fit.
+
 **Verdict.**
 
 * No class that can be searched exhaustively contains a simple rule, from any starting pattern,
-  on the square, hexagonal or cubic lattice or in 4 to 6 dimensions.
+  on the square, hexagonal or cubic lattice, or in any higher dimension tried (symmetric families
+  up to 21 dimensions, two of them proved for every dimension; tables up to 10).
 * The simplest rules that look like prime generators reproduce a wheel and break at 25 at the
   latest.
 * A rule that generates every prime, if one exists, is not simple: it has to keep finding new
@@ -287,6 +330,7 @@ continue with 21, not 19.
 
 ```
 cargo run --release -- search  --class totalistic --any-start --terms 30          # every Life-like rule, every start
+cargo run --release -- sweep   --min-dim 2 --max-dim 21 --terms 14               # symmetric families, every dimension
 cargo run --release -- search  --neighbourhood hex --class isotropic --any-start --terms 30
 cargo run --release -- profile --any-start --terms 12 --time-limit 120 --entry-cap 70
 cargo run --release -- scan    --any-start --max-arity 4 --terms 40

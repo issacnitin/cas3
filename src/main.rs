@@ -14,6 +14,7 @@ mod reference;
 mod sequences;
 mod table_search;
 mod rule_class;
+mod dimension_sweep;
 mod construct;
 mod bootstrap;
 mod conveyor;
