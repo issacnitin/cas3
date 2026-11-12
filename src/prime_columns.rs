@@ -1240,9 +1240,9 @@ mod test {
     #[test]
     fn the_head_tests_primality_by_long_division() {
         let primes = primes(3000);
-        for w in [3u32, 4, 5, 8] {
+        for w in [3u32, 4, 5, 8, 64] {
             for n in 2..=1500u64 {
-                // Enough digits for 4 n, as in a real column.
+                // Enough digits for 4 n, as in a real column (at least two).
                 let bits = 128 - (4 * n as u128).leading_zeros();
                 let h = bits.div_ceil(w) as usize;
                 let prime = head_verdict(w, n, h.max(2));
@@ -1253,6 +1253,126 @@ mod test {
                     w,
                     n
                 );
+            }
+        }
+    }
+
+    /// Reads the values of the column at (x, y): (n, row, 4 row^2 below 2^128, height).
+    fn column_values(sim: &SparseSim, x: i64, y: i64) -> (u128, u128, u128, usize) {
+        let w = sim.params.w;
+        let (mut n, mut row, mut sq4, mut h) = (0u128, 0u128, 0u128, 0usize);
+        while let Some(Cell3::Digit(d)) = sim.cells.get(&(x, y, h as i64)) {
+            let shift = w * h as u32;
+            if shift < 128 {
+                n |= (d.n as u128) << shift;
+                row |= (d.row as u128) << shift;
+                sq4 |= (d.sq4 as u128) << shift;
+            }
+            if d.top {
+                return (n, row, sq4, h + 1);
+            }
+            h += 1;
+        }
+        panic!("column ({}, {}) is incomplete", x, y);
+    }
+
+    /// Row creation with 64-bit digits where columns gain digits: from the last narrow row
+    /// (2^31 - 1) to the first wide row, and from row 2^63 - 1 to row 2^63, whose 4 y^2 = 2^128
+    /// needs a third digit. The stored row numbers are huge; the rule never reads coordinates, so
+    /// the columns can stand at small ones. Both the column above and the new last column (above
+    /// right) are checked.
+    #[test]
+    fn rows_are_built_digit_by_digit_with_64_bit_digits() {
+        let p = Params::REAL;
+        let start = |y: u128| y * (y - 1) / 2 + 1;
+        let empty = |y_max| SparseSim {
+            params: p,
+            cells: std::collections::HashMap::new(),
+            time: 0,
+            y_max,
+        };
+        // Narrow to wide.
+        let y = (1u64 << 31) - 1;
+        let last = start(y as u128) + y as u128 - 1;
+        let mut tile = new_tile_offset(last as u64, y, 0, 0);
+        tile.wait = 0;
+        let mut sim = empty(6);
+        sim.cells.insert((0, 5, 0), Cell3::Narrow(tile));
+        for _ in 0..4 {
+            sim.step();
+        }
+        let y = y as u128;
+        let sq4 = 4 * (y + 1) * (y + 1);
+        assert_eq!(column_values(&sim, 0, 6), (last + y, y + 1, sq4, 2));
+        assert_eq!(column_values(&sim, 1, 6), (last + y + 1, y + 1, sq4, 2));
+        // Wide to wide, gaining a third digit.
+        let y: u128 = (1 << 63) - 1;
+        let last = start(y) + y - 1;
+        let sq4 = 4 * y * y;
+        let mut sim = empty(6);
+        for k in 0..2u32 {
+            let mut d = fresh_digit(k == 0);
+            d.n = (last >> (64 * k)) as u64;
+            d.row = (y >> (64 * k)) as u64;
+            d.sq4 = (sq4 >> (64 * k)) as u64;
+            d.top = k == 1;
+            sim.cells.insert((0, 5, k as i64), Cell3::Digit(d));
+        }
+        for _ in 0..5 {
+            sim.step();
+        }
+        for (x, n) in [(0, last + y), (1, last + y + 1)] {
+            // 4 (y + 1)^2 = 2^128: digits 0, 0, 1.
+            assert_eq!(column_values(&sim, x, 6), (n, y + 1, 0, 3));
+            assert!(matches!(
+                sim.cells.get(&(x, 6, 2)),
+                Some(Cell3::Digit(d)) if d.sq4 == 1 && d.n == 0 && d.row == 0
+            ));
+        }
+    }
+
+    /// The chain from the last narrow row, the suffix pass, the broadcast and the countdowns with
+    /// 64-bit digits and the real clock: four decided columns standing for numbers of row 2^31
+    /// (a short stand-in row; the rule reads only the stored values). With P = pi(end of the row
+    /// below) and c primes in the row, column x must turn set exactly at P + c - suffix(x) + 1.
+    #[test]
+    fn countdowns_with_64_bit_digits_flip_exactly_on_time() {
+        let p = Params::REAL;
+        let y = 1u64 << 31;
+        let first = (y as u128) * (y as u128 - 1) / 2 + 1;
+        let big_p = 50_000_000_000_000_000u64; // about pi of the numbers involved
+        let t0 = big_p - 300;
+        let mut sim = SparseSim {
+            params: p,
+            cells: std::collections::HashMap::new(),
+            time: t0,
+            y_max: 6,
+        };
+        let mut source = new_tile_offset((first - y as u128 + 1) as u64, y - 1, t0, 0);
+        source.p_end = Some(big_p);
+        source.prime = Some(false);
+        source.suffix = Some(0);
+        source.tau = Some(u64::MAX / 2);
+        sim.cells.insert((0, 5, 0), Cell3::Narrow(source));
+        let primes = [true, false, false, true];
+        for (x, &prime) in primes.iter().enumerate() {
+            let n = first + x as u128;
+            for (z, d) in decided_column(&p, n as u64, y, prime)
+                .into_iter()
+                .enumerate()
+            {
+                sim.cells.insert((x as i64, 6, z as i64), Cell3::Digit(d));
+            }
+        }
+        let c = primes.iter().filter(|&&q| q).count() as u64;
+        let tau: Vec<u64> = (0..4)
+            .map(|x| big_p + c - primes[x..].iter().filter(|&&q| q).count() as u64 + 1)
+            .collect();
+        while sim.time < tau[3] + 3 {
+            sim.step();
+            for (x, &due) in tau.iter().enumerate() {
+                let set = sim.cells.get(&(x as i64, 6, 1)).is_some_and(|c| c.is_set());
+                assert_eq!(set, due <= sim.time, "column {} at step {}", x, sim.time);
             }
         }
     }

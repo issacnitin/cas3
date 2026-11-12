@@ -421,12 +421,15 @@ one rule. The seed is again one set cell.
 **How it was checked.**
 
 * The plane \(z=0\) equals the 2D automaton, cell for cell (400 steps).
-* The division head classifies every \(n\le1500\) correctly with 3-, 4-, 5- and 8-bit digits.
+* The division head classifies every \(n\le1500\) correctly with 3-, 4-, 5-, 8- and 64-bit digits.
+* With 64-bit digits, rows are built correctly where columns gain digits: from the last narrow row
+  (\(2^{31}-1\)) to the first column row, and from row \(2^{63}-1\) to row \(2^{63}\) (three
+  digits). With the real clock, 64-bit countdowns fed by the last narrow row flip exactly on time.
 * From the seed, with small digits so that columns appear after a few rows, the count is exact at
-  every step: 3, 4, 5, 6, 8 and 14-bit digits, up to row 90 (\(p\) up to 4,093). With 14-bit digits,
-  rows 51–63 use the 2D machinery before the columns take over. Small digits make the machinery
-  too slow for the tiny early deadlines, so these runs give it a head start of \(K\) steps (the
-  count is then \(p_{t-K}\)). Columns are sized so that the extra \(K\) fits.
+  every step: 3, 4, 5, 6, 8, 14 and 16-bit digits, up to row 160 (\(p\) up to 12,853). With 14- and
+  16-bit digits, rows 51–63 (51–127) use the 2D machinery before the columns take over. Small digits
+  make the machinery too slow for the tiny early deadlines, so these runs give it a head start of
+  \(K\) steps (the count is then \(p_{t-K}\)). Columns are sized so that the extra \(K\) fits.
 * With the real clock and no head start: two rows whose primality is already decided run the suffix
   pass, the chain (from a narrow tile and from columns), the broadcast and countdowns several digits
   wide. Every column flips exactly on time, including columns one digit taller than the row below.
