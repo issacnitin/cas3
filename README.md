@@ -337,6 +337,125 @@ cargo run --release -- scan    --any-start --max-arity 4 --terms 40
 cargo run --release -- search  --seed "-1,0;1,0" --target 2,3,5,7,11,13,17,19,23,25,29 --max-entries 26 --show 1
 ```
 
+## A cellular automaton whose count is the next prime
+
+Searching did not find a simple rule, so `src/prime_display.rs` builds one. Start from one set
+cell. After each application of the rule the number of set cells is the next prime:
+
+```
+step   0  1  2  3  4  5   6   7   8   9  10 ...
+count  1  2  3  5  7  11  13  17  19  23  29 ...
+```
+
+**What kind of automaton.** It is two-dimensional, uses the Moore neighbourhood (radius 1) and
+one rule for every cell. A cell is either empty or a tile. A tile has a visible "set" flag plus
+hidden integers (64-bit words), so the state set is finite but very large. The count is the
+number of set cells; the cells that do the computing stay unset until their turn.
+
+**How it works.**
+
+* Every integer \(n\) gets its own cell in a growing triangle. Row \(y\) holds the \(y\)
+  consecutive numbers starting at \(y(y-1)/2+1\). Each row creates the next one, a little
+  slower than light speed, so the triangle stays ahead of the numbers that are needed.
+* Cell \(n\) turns set at step \(\tau(n)=\pi(n-1)+1\) and stays set. After step \(t\) the set
+  cells are then exactly \(1,\dots,p_t\), so the count is \(p_t\).
+* To learn \(\tau(n)\), each cell:
+  1. tests its own primality by trial division, one divisor per step;
+  2. counts the primes from itself to the end of its row (a right-to-left pass);
+  3. receives the prime count below its row (passed up the left edge, then copied along the row);
+  4. carries the global time and turns set when the time reaches \(\tau(n)\).
+* This takes about \(\sqrt n + 3y\) steps, while \(\tau(n)\) grows like \(n/\ln n\). The numbers
+  up to 1275 (rows 1–50) are too early for that, so the rule contains a table of their flip
+  times. With 40 rows the machinery has no slack left, and with 30 it is late.
+
+**How it was checked.**
+
+* Two simulators run the same rule: a direct one, and an event-driven one that only evaluates
+  cells that can change. They agree cell by cell (tested for 900 steps).
+* The count equals \(p_t\) at every step for 3,000 steps (direct) and 20,000 steps
+  (event-driven, up to \(p=224{,}737\)).
+* A timing certificate bounds when each cell learns \(\tau\) and compares that with its deadline,
+  using exact \(\pi\) up to \(10^7\) and Dusart's bound \(\pi(x)\ge x/(\ln x-1)\) above. It covers
+  every row whose numbers fit in 64 bits (rows 51 to 6,074,000,998). The tightest row is 52, with
+  26 steps to spare (31 in simulation).
+* So this rule is exact for every step before 114,179,426,570,746,131, when its 64-bit words
+  overflow.
+
+```
+cargo run --release -- primeca --steps 20000            # event-driven, prints the count at each report
+cargo run --release -- primeca --steps 3000 --direct    # direct simulation
+cargo run --release -- primeca --certificate           # timing certificate for every 64-bit row
+```
+
+### A finite alphabet, exact at every step (3D)
+
+`src/prime_columns.rs` removes the 64-bit limit. Every cell holds a bounded amount of data: a few
+64-bit digits and flags. The automaton is exact at every step, forever.
+
+**What kind of automaton.** It is three-dimensional, uses the Moore neighbourhood (radius 1) and
+one rule. The seed is again one set cell.
+
+* The plane \(z=0\) runs the 2D automaton above, unchanged, for every row below \(2^{31}\), i.e.
+  for every step before about \(1.5\times10^{16}\). On that range it is the 2D automaton, cell for
+  cell.
+* From row \(2^{31}\) on, every number is a column of 64-bit digits standing on its cell of the
+  triangle. The column has as many digits as \(4y^2\) needs (2 until row \(2^{63}\), then 3, …).
+  Only the top cell of a column can be set.
+
+**How a column works.** It does what a 2D tile does, one digit per cell:
+
+* New rows are built digit by digit, with carries moving up. A column grows one digit when the
+  row number needs it.
+* A head walks up and down the column doing trial division, with each remainder computed by
+  binary long division.
+* The suffix pass, the chain and the broadcast work as in 2D, with carries moving up.
+* The clock is replaced by counters that every column decrements at every step:
+  \(Q=\pi(\text{row end})-t\), passed along the chain and the broadcast, and the countdown
+  \(\tau-t=Q+1-\text{suffix}\). The cell turns set when the countdown reads 0.
+* Borrows climb one digit per step, so digit \(k\) of a counter lags \(k\) steps behind. A flag
+  climbing with the borrows ("every digit below me is 0") is exact, so the top cell sees exactly
+  when the whole countdown reads 0, but \(h-1\) steps late. To make up for that, every digit sends
+  one extra decrement down when the countdown starts. Nothing depends on the column height, so
+  there is no limit to how tall columns may grow.
+
+**How it was checked.**
+
+* The plane \(z=0\) equals the 2D automaton, cell for cell (400 steps).
+* The division head classifies every \(n\le1500\) correctly with 3-, 4-, 5- and 8-bit digits.
+* From the seed, with small digits so that columns appear after a few rows, the count is exact at
+  every step: 3, 4, 5, 6, 8 and 14-bit digits, up to row 90 (\(p\) up to 4,093). With 14-bit digits,
+  rows 51–63 use the 2D machinery before the columns take over. Small digits make the machinery
+  too slow for the tiny early deadlines, so these runs give it a head start of \(K\) steps (the
+  count is then \(p_{t-K}\)). Columns are sized so that the extra \(K\) fits.
+* With the real clock and no head start: two rows whose primality is already decided run the suffix
+  pass, the chain (from a narrow tile and from columns), the broadcast and countdowns several digits
+  wide. Every column flips exactly on time, including columns one digit taller than the row below.
+* A sparse simulator that evaluates every cell next to a non-empty one agrees with the dense one,
+  so the rule creates nothing outside the triangle.
+* Planted bugs in the countdown (no extra decrements, no zero flag, an off-by-one) are all caught.
+* The latency bounds used by the certificate hold for every simulated column.
+* **Timing certificate for the real automaton** (`primecols --certificate`):
+  * rows 51 to \(2^{31}-1\) are covered by the 2D certificate;
+  * every later row is checked on a geometric grid up to row \(10^{150}\), with an analytic
+    estimate beyond (latency \(O(y\log^2 y)\) against deadlines of order \(y^2/\log y\));
+  * every column's countdown is exact before its deadline, with the bound at most 0.27 of the
+    deadline (worst at row \(2^{31}\)).
+
+```
+cargo run --release -- primecols --certificate                # every row of the real automaton
+cargo run --release -- primecols --w 4 --k 6000 --rows 40    # 4-bit digits, columns from row 2
+cargo run --release -- primecols --w 14 --k 10000 --rows 90  # 2D machinery, then columns from row 64
+```
+
+**Dimensions.**
+
+* One dimension is impossible for any rule: a 1D pattern grows by a bounded number of cells per
+  step, while \(p_t\) grows like \(t\ln t\).
+* Two dimensions work with 64-bit cells, for the first \(1.1\times10^{17}\) steps.
+* Three dimensions work forever with a finite alphabet.
+* Folding the columns into the plane (each row a band of \(h\) grid rows) should give the same in
+  2D, but that has not been built.
+
 ## Constructive route
 
 `src/construct.rs` implements the part of the population construction that is independent of
@@ -599,7 +718,18 @@ found, and the minimum description length of the prime prefixes keeps growing. T
 from every starting pattern as well (pair reduction): every symmetric class dies within
 seven primes when it is small enough to exhaust. Symmetric classes with millions of entries fit 30
 primes only by consulting hundreds of entries. The cheapest long fits are wheels for 2 and 3 that
-break at 25. The constructive
-answer now has recurrent arithmetic, ordered batches, explicit throughput/population bounds and a
-binary compiler. The whole population question remains open until the local epoch factory,
-gap-to-mask transport, arena invariant and all-\(t\) handoff induction are complete.
+break at 25.
+
+A rule that does generate the primes exists once it is allowed to compute (see "A cellular
+automaton whose count is the next prime"):
+
+* The 2D automaton turns one set cell into \(p_t\) set cells after every step \(t\). It was
+  simulated for 20,000 steps and is certified up to its 64-bit limit (\(1.1\times10^{17}\) steps).
+* The 3D automaton with a finite alphabet does the same at every step, forever. It is simulated
+  with small digits and certified for every row with 64-bit digits.
+* In one dimension no rule can do it: a 1D pattern grows by a bounded number of cells per step,
+  while \(p_t\) grows like \(t\ln t\).
+
+The epoch construction described under "Constructive route" is an earlier, unfinished attempt at
+a two-state version; it remains open until the local epoch factory, gap-to-mask transport, arena
+invariant and all-\(t\) handoff induction are complete.

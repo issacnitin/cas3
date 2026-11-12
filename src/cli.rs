@@ -52,6 +52,9 @@ COMMANDS:
     rolling   Recurrently classify stride-partitioned batches under one local CA rule
     epoch     Print the conservative dyadic coverage and population resource check
     mask      Decode one binary split count and commit a synchronized prime output
+    primeca   Run the 2D prime-counting automaton (64-bit cells) from one set cell and check
+              that the number of set cells is the next prime after every step
+    primecols Run the 3D finite-alphabet version (numbers as digit columns) and check it
     sweep     Symmetric families (Life-like, von Neumann totalistic and isotropic) in any
               dimension up to 21, from every starting pattern: the longest run of primes
     space     Compare the legacy search-space size with the new one, per dimension
@@ -146,6 +149,20 @@ OPTIONS (sweep):
     --terms N               primes in the target, from 2               [default: 12]
     --node-limit N          search nodes per family and dimension      [default: 50000000]
     --max-offsets N         skip Moore families with more neighbours   [default: 200000]
+
+OPTIONS (primeca):
+    --steps N               steps to simulate and check                 [default: 1000]
+    --report N              print every N steps                       [default: steps/10]
+    --direct                apply the rule to every cell (default: event-driven)
+    --certificate           timing certificate instead of a simulation
+    --rows N                rows covered by the certificate      [default: every 64-bit row]
+
+OPTIONS (primecols):
+    --w W                   bits per digit, 3..64 (64 = the real automaton)      [default: 6]
+    --k K                   head start: the clock reads step - K (0 = real)   [default: 8000]
+    --rows N                rows simulated (rows never read the rows above)     [default: 30]
+    --report N              print every N clock steps                  [default: about 10 lines]
+    --certificate           timing certificate for every row (with --w, default 64)
 
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
@@ -1078,6 +1095,155 @@ fn run_primeca(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `primecols`: the finite-alphabet 3D automaton, from one set cell, checked at every step.
+fn run_primecols(opts: &Options) -> Result<(), String> {
+    use crate::prime_columns::{wide_certificate, ColumnSim, Params};
+    if opts.flag("certificate") {
+        let w = opts.number::<u32>("w")?.unwrap_or(64);
+        let started = std::time::Instant::now();
+        println!(
+            "timing certificate, {}-bit digits, no head start{}",
+            w,
+            if w == 64 { " (the real automaton)" } else { "" }
+        );
+        let c = wide_certificate(w)?;
+        println!(
+            "narrow rows 51..{}: every tile on time (2D certificate)",
+            c.first_wide_row - 1
+        );
+        println!(
+            "wide rows from {} (created at step {}): every column's countdown is exact before its deadline",
+            c.first_wide_row, c.created
+        );
+        println!(
+            "  checked on a grid up to row {:.0e}, tail estimate beyond; worst bound/deadline ratio {:.4} (near row {:.4e}) ({:.2?})",
+            c.checked_to, c.worst_ratio, c.worst_row, started.elapsed()
+        );
+        return Ok(());
+    }
+    let w = opts.number::<u32>("w")?.unwrap_or(6);
+    let k = opts.number::<u64>("k")?.unwrap_or(8000);
+    let rows = opts.number::<u64>("rows")?.unwrap_or(30);
+    if !(3..=64).contains(&w) || rows < 2 {
+        return Err("need 3 <= --w <= 64 and --rows >= 2".into());
+    }
+    let params = Params { w, k };
+    let last = (rows * (rows + 1) / 2) as usize;
+    let mut composite = vec![false; last + 1];
+    let mut pi = vec![0u64; last + 1];
+    let mut primes = vec![];
+    for j in 2..=last {
+        if !composite[j] {
+            primes.push(j as u64);
+            let mut i = j * j;
+            while i <= last {
+                composite[i] = true;
+                i += j;
+            }
+        }
+        pi[j] = primes.len() as u64;
+    }
+    // The clock can run until the next prime lies beyond the simulated rows.
+    let ticks = primes.len() as u64;
+    let every = opts.number::<u64>("report")?.unwrap_or((ticks / 10).max(1));
+    let narrow = (1..=rows).take_while(|&y| params.is_narrow(y)).count();
+    println!(
+        "prime-counting automaton with a finite alphabet: 3D, Moore neighbourhood, digits of {} bits, head start {} steps",
+        w, k
+    );
+    println!(
+        "rows 1..={} run the 2D rule in the plane z = 0; rows {}..={} store each number as a column of digits",
+        narrow,
+        narrow + 1,
+        rows
+    );
+    println!(
+        "checking: after step s the number of set cells is p_(s - {}) (p_0 = 1; none before), up to p = {}",
+        k,
+        primes.last().copied().unwrap_or(1)
+    );
+    println!(
+        "{:>7} {:>10} {:>10} {:>6} {:>7} {:>12} {:>10}",
+        "clock", "step", "set", "rows", "digits", "min slack", "time"
+    );
+    let started = std::time::Instant::now();
+    let mut sim = ColumnSim::new(params, rows);
+    let mut slack: Option<(i128, u128)> = None;
+    let mut armed_at = HashMap::new();
+    for step in 1..=k + ticks {
+        sim.step();
+        for &(x, y) in &sim.armed {
+            armed_at.insert((x, y), step);
+            if let Some((n, h)) = sim.column_number(x, y) {
+                let due = (pi[(n - 1) as usize] + 1 + k) as i128;
+                // The countdown is complete, its extra decrements delivered and their borrows
+                // climbed to the top 3h steps after the bottom digit is set up.
+                let margin = due - (step as i128 + 3 * h as i128);
+                if slack.map_or(true, |(s, _)| margin < s) {
+                    slack = Some((margin, n));
+                }
+            }
+        }
+        let expected = match step.checked_sub(k) {
+            None => 0,
+            Some(0) => 1,
+            Some(t) => primes[t as usize - 1],
+        };
+        let now = sim.set_count();
+        if now != expected {
+            // Name the columns that are wrong, and whether their machinery was simply late.
+            for y in 1..=rows as i64 {
+                for x in 0..y {
+                    let n = (y * (y - 1) / 2 + 1 + x) as usize;
+                    let due = pi[n - 1] + 1 + k;
+                    if sim.column_set(x, y) != (due <= step) {
+                        println!(
+                            "  n = {}: due at step {}, set = {}, countdown armed at {}; {}",
+                            n,
+                            due,
+                            sim.column_set(x, y),
+                            armed_at
+                                .get(&(x, y))
+                                .map_or("-".to_string(), |s| s.to_string()),
+                            sim.column_status(x, y)
+                        );
+                    }
+                }
+            }
+            return Err(format!(
+                "step {}: {} set cells, expected {}",
+                step, now, expected
+            ));
+        }
+        if let Some(clock) = step.checked_sub(k) {
+            if clock % every == 0 || clock == ticks {
+                println!(
+                    "{:>7} {:>10} {:>10} {:>6} {:>7} {:>12} {:>10.2?}",
+                    clock,
+                    step,
+                    now,
+                    sim.height(),
+                    sim.depth(),
+                    slack.map_or("-".to_string(), |(s, _)| s.to_string()),
+                    started.elapsed()
+                );
+            }
+        }
+    }
+    println!(
+        "all {} steps match: the count is p_(s - {}) after every step s",
+        k + ticks,
+        k
+    );
+    if let Some((margin, n)) = slack {
+        println!(
+            "tightest column: n = {} was ready {} steps before its deadline",
+            n, margin
+        );
+    }
+    Ok(())
+}
+
 /// `sweep`: symmetric families from every starting pattern, dimension by dimension.
 fn run_sweep(opts: &Options) -> Result<(), String> {
     use crate::dimension_sweep::{sweep, Family, MAX_SWEEP_DIM};
@@ -1569,6 +1735,7 @@ pub fn run() {
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "sweep" => parse_options(&args[1..]).and_then(|o| run_sweep(&o)),
         "primeca" => parse_options(&args[1..]).and_then(|o| run_primeca(&o)),
+        "primecols" => parse_options(&args[1..]).and_then(|o| run_primecols(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),
         "help" | "--help" | "-h" => {
             print!("{}", USAGE);

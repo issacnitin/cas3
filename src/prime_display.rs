@@ -34,7 +34,8 @@
 * Integers are 64-bit words. `timing_certificate` checks every row whose numbers fit in 64 bits
 * (rows up to 6,074,000,998): each tile learns tau before it is due, the tightest by 26 steps (row
 * 52). Row 6,074,001,000 would overflow 64 bits; it appears at step 114,179,426,570,746,131, so this
-* rule is exact for every step before that one.
+* rule is exact for every step before that one. `prime_columns` extends it to a finite alphabet that
+* is exact at every step.
 */
 
 use std::sync::OnceLock;
@@ -122,6 +123,12 @@ pub fn pace(row: u64) -> u64 {
 
 /// A freshly created cell for number n in row `row` at global time `time`.
 fn new_tile(n: u64, row: u64, time: u64) -> Tile {
+    new_tile_offset(n, row, time, 0)
+}
+
+/// `new_tile` for a clock that reads `time - k` (`k` = 0 is this automaton; `prime_columns` tests
+/// use k > 0 to give slow test machinery a head start).
+pub(crate) fn new_tile_offset(n: u64, row: u64, time: u64, k: u64) -> Tile {
     let mut tile = Tile {
         n,
         row,
@@ -139,7 +146,7 @@ fn new_tile(n: u64, row: u64, time: u64) -> Tile {
         tile.d = 0;
         tile.tau = Some(if n == 1 { 0 } else { pi[(n - 1) as usize] + 1 });
         tile.p_end = Some(pi[row_last(row) as usize]);
-        tile.set = tile.tau.unwrap() <= time;
+        tile.set = tile.tau.unwrap() + k <= time;
     }
     tile
 }
@@ -181,6 +188,11 @@ pub fn next(centre: Cell, nb: &Neighbours) -> Cell {
 }
 
 fn update(c: Tile, nb: &Neighbours) -> Tile {
+    update_offset(c, nb, 0)
+}
+
+/// `update` for a clock that reads `time - k` (see `new_tile_offset`).
+pub(crate) fn update_offset(c: Tile, nb: &Neighbours, k: u64) -> Tile {
     let mut t = c;
     t.time = c.time + 1;
     t.wait = c.wait.saturating_sub(1);
@@ -226,7 +238,7 @@ fn update(c: Tile, nb: &Neighbours) -> Tile {
         }
     }
     if let Some(tau) = t.tau {
-        if tau <= t.time {
+        if tau + k <= t.time {
             t.set = true;
         }
     }
@@ -393,6 +405,22 @@ pub fn timing_certificate(y_max: u64) -> Result<(u64, f64), u64> {
         }
     }
     Ok(worst)
+}
+
+/// The certificate's schedule at row `y` (> BOOTSTRAP_ROWS): (C(y), P_y), the step at which row y
+/// appears and the bound P_y on the step at which its first tile knows pi(last number of the row).
+pub fn narrow_schedule(y: u64) -> (u128, u128) {
+    let mut created = (BOOTSTRAP_ROWS - 1) as u128;
+    let mut chain = created;
+    let mut row = BOOTSTRAP_ROWS;
+    while row < y {
+        created += pace(row) as u128 + 1;
+        row += 1;
+        let last = (row as u128) * (row as u128 + 1) / 2;
+        let sqrt = (last as f64).sqrt().floor() as u128 + 1;
+        chain = chain.max(created + sqrt + row as u128) + 1;
+    }
+    (created, chain)
 }
 
 /// Step at which row `y` appears: C(y) = C(y-1) + pace(y-1) + 1, C(1) = 0.

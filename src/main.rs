@@ -16,6 +16,7 @@ mod table_search;
 mod rule_class;
 mod dimension_sweep;
 mod prime_display;
+mod prime_columns;
 mod construct;
 mod bootstrap;
 mod conveyor;
