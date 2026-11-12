@@ -1470,6 +1470,10 @@ mod test {
                 armed.insert((x, y), sim.time);
             }
         }
+        // Wide rows appear one per step (the certificate's C(y) = C + y - Y0).
+        for y in 2..y_max as i64 {
+            assert_eq!(created[&(y + 1)], created[&y] + 1, "row {}", y + 1);
+        }
         // Row 1 is the seed (narrow, from the table): its p_end is known from step 0.
         let mut source = 0u128;
         let mut checked = 0;
