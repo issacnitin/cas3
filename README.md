@@ -385,6 +385,36 @@ multiplications one after another, and on a grid each takes longer the more digi
   Its correctness there rests on testing each mechanism with full-size 64-bit digits and on the
   timing certificate.
 
+## The open problem: only on and off
+
+The real prize is the strict version, and it is still unsolved:
+
+1. Each cell is either on or off.
+2. Every cell follows the same rule, which looks only at the cell and its 8 neighbours. An off cell
+   with no on neighbours stays off.
+3. It starts with 2 cells on.
+4. After every step, the number of on cells is exactly the next prime: 2, 3, 5, 7, 11, 13, …
+   forever.
+
+There are about 10¹⁵⁴ such rules, and only five essentially different starting pairs matter (two
+cells further apart always end up with an even count). Where things stand:
+
+- **The best rule found follows the first 76 primes** (2 to 383), starting from two cells
+  diagonally two apart. At step 76 it has 398 cells on instead of 389. It gets that far by
+  memorising: it uses 485 of the 512 possible neighbourhood patterns, about 6 per prime, so this
+  kind of fitting runs out of table long before 10,000 primes. A rule that gets that far would
+  have to compute the primes.
+- **No small rule works.** Every rule using fewer than 44 of the 512 patterns goes wrong within the
+  first 12 primes, from any starting pattern.
+- **Building one by hand is hard** because every on cell counts, including all the machinery that
+  would work out the primes. That machinery would have to keep its own count exactly predictable
+  at every step, whatever it is computing. An earlier attempt here did this with blocks that always
+  hold the same number of on cells, but it needed cells to see further than their 8 neighbours,
+  and it was never finished.
+
+`cargo run --release -- onoff --rule <128 hex digits> --seed "0,0;1,0"` checks any candidate rule
+against the first 10,000 primes. Passing would still not be proof that it works forever.
+
 ## Run it yourself
 
 You need Rust (`cargo`).
@@ -408,6 +438,8 @@ You need Rust (`cargo`).
 | `cargo run --release -- constant-time --records --limit 100000000000` | every record jump between prime gaps up to 100 billion |
 | `cargo run --release -- next-prime --show 23` | watch the from-scratch rule turn 23 lit cells into 29 |
 | `cargo run --release -- next-prime` | run it from every starting number up to 2,000 and time it for every prime up to 100 million |
+| `cargo run --release -- onoff --search --terms 120 --time-limit 300` | search on/off rules for the strict goal and print the best ones found |
+| `cargo run --release -- onoff --rule <hex> --seed "-1,-1;1,1"` | check any on/off rule against the primes (try the 76-prime rule in `src/onoff.rs`) |
 | `cargo run --release -- help` | every command and option |
 | `cargo test --release` | the test suite |
 
@@ -422,6 +454,7 @@ You need Rust (`cargo`).
 | `src/multi_state.rs` | the search over rules whose cells have 3 or more states |
 | `src/constant_time.rs` | why no rule jumps to the next prime in a fixed number of steps, and the primes that show it |
 | `src/bare_prime.rs` | the rule that finds the next prime from the prime alone in about √p steps, and why none is much faster |
+| `src/onoff.rs` | the strict on/off goal: checking any rule against the primes, and the best rule found |
 | `src/bounds.rs` | the impossibility proofs (one dimension, symmetric rules) |
 | `src/construct.rs`, `src/prime_worker.rs`, `src/scheduler.rs` and others | the unfinished on/off-only construction |
 | `src/state_explorer.rs`, `src/space.rs`, `src/rule.rs` | the original formula-based search (`legacy`) |

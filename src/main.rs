@@ -20,6 +20,7 @@ mod prime_columns;
 mod multi_state;
 mod constant_time;
 mod bare_prime;
+mod onoff;
 mod demo;
 mod construct;
 mod bootstrap;

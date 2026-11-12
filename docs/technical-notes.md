@@ -846,6 +846,92 @@ cargo run --release -- next-prime --show 23                            # draw on
 cargo run --release -- next-prime --sim 10000 --limit 100000000000
 ```
 
+## The strict on/off goal
+
+The goal in its strictest form:
+
+1. each cell is either on or off;
+2. every cell follows the same rule, which looks only at the cell and its 8 neighbours, and an off
+   cell with no on neighbours stays off;
+3. it starts with 2 cells on;
+4. after every step, the number of on cells is exactly the next prime: 2, 3, 5, 7, 11, … forever.
+
+Success would be a rule that matches the first 10,000 primes when run, together with a proof that
+it never goes wrong. There are $2^{511}\approx10^{154}$ rules. By the pair reduction
+(`src/bounds.rs`), two cells that are further apart always produce an even count, so only the 12
+close pairs matter, which make 5 up to the symmetries of the square. Each rule then has to be
+right forever, so the question cannot be settled by running candidates. It is open: no rule is
+known and none is ruled out.
+
+**Validation loop** (`src/onoff.rs`, command `onoff`). A candidate is a complete rule written as
+128 hex digits (one bit per $3\times3$ pattern). `onoff --rule HEX --seed CELLS` runs it on a
+dense grid with its own code and stops at the first wrong count. The grid simulator agrees with
+the independent reference simulator on 40 random rules. A rule found by the search is judged as a
+complete rule, with every entry the search left open set to off. `onoff --search` runs the exact
+lazy search (`search --class table`) from every close pair. The search now also keeps the entries
+assigned on the way to the deepest step it reaches, so a run that stops at a time limit still
+yields its best rule; a test checks that this rule reproduces the run it was found with.
+
+Deep runs exposed a gap in the search engine. When it decides the open entries of a step, it
+only checked that the remaining groups of cells could still supply *enough* cells, not *exactly*
+the number needed. Groups come in sizes such as 2 and 4, so it could enumerate exponentially many
+dead ends without reaching a new configuration. It also read the clock only between
+configurations, so one such step overran a 20-minute limit by 25 minutes. Each step now carries
+the exact subset sums of its groups, as in `multistate`, so every choice it makes leads to a
+child, and the clock is also read inside the enumeration. Only dead ends are skipped, so
+solutions, verdicts and node counts are unchanged: six exhaustive runs (tables, Life-like,
+isotropic, hexagonal, the 26-entry wheel, one seed and every pair) print identical results
+before and after, and the whole test suite passes.
+
+**Best rules found** (target 120 primes, two runs of 300 seconds per pair, best of the two per
+pair; the parallel search reaches different depths from run to run). Each line is a complete
+rule, re-checked by the grid simulator:
+
+| starting pair | primes matched | entries consulted (of 512) | count at the first wrong step |
+|---|---|---|---|
+| (0,0), (1,0) | 40 (2 … 173) | 379 | 190 instead of 179 |
+| (0,0), (1,1) | 49 (2 … 227) | 382 | 239 instead of 229 |
+| (−1,0), (1,0) | 56 (2 … 263) | 421 | 273 instead of 269 |
+| (0,0), (2,1) | 52 (2 … 239) | 412 | 267 instead of 241 |
+| (−1,−1), (1,1) | **76 (2 … 383)** | 485 | 398 instead of 389 |
+
+A 20-minute run from the diagonal pair (911 million nodes) also stops at 76 primes. A separate
+pure-Python simulation confirms the 76-prime rule.
+
+These rules memorise. They consult 6 to 10 table entries per prime, and the best one leaves only
+26 of the 511 free entries unused, so this way of fitting runs out of table long before 10,000
+primes. (The exact minimum is known for short runs: every rule consulting fewer than 44 entries
+fails within the first 12 primes, from any starting pattern; see "Minimal rule size".) A rule
+that reaches 10,000 primes would have to compute them. `BEST_RULE` in `src/onoff.rs` is the
+76-prime rule, and a test checks it.
+
+**Why building one is hard.** Every on cell counts, including the cells of whatever machinery
+works out the primes. So the machinery's population has to be exactly predictable at every step,
+whatever it is computing. The "Constructive route" below gets this by building everything from
+blocks with a fixed number of on cells. Its binary rule, however, reads cells at least two block
+widths away (`codec.radius() >= 2 * codec.stride_x`), not just the 8 neighbours. It is also
+unfinished, and its schedule only takes over from $N=2^{88}$, so everything below that would have
+to be a finite bootstrap.
+
+**A possible direction with 8 neighbours (not built).** A strip three cells tall with exactly one
+lit cell in each column has a constant count. Every cell of a column sees at least two of the
+three rows of its own and both neighbouring columns, which is enough to tell where their lit cells
+are. So a 3-state one-dimensional rule could run inside the strip at full speed. If the strip grew
+by one column per step (+1) and sent off $d_t-1$ single lit cells that fly away at step $t$, the
+count would be exactly $p_{t+1}$, starting from the first two columns as the initial pair. That
+reduces the goal to two things, neither of which exists:
+
+* a one-dimensional rule with 3 states that computes prime gaps in step with the primes: about
+  $\ln t$ numbers per step, which needs growing parallelism;
+* consistency of every $3\times3$ pattern, including the strip's edges, its growing end and the
+  departing cells (some uniform columns are forced to stay put).
+
+```
+cargo run --release -- onoff --rule 04448002a115402485a44d643cd1d12e905f002597e9c3e4546ecca1b0d6b008545009b2ac5eea87f1981ee2e55045d554e3cec13d6db490750498a2bb085798 --seed "-1,-1;1,1"
+cargo run --release -- onoff --search --terms 120 --time-limit 300                 # every pair
+cargo run --release -- onoff --search --seed "-1,-1;1,1" --terms 120 --time-limit 1200
+```
+
 ## Constructive route
 
 `src/construct.rs` implements the part of the population construction that is independent of
@@ -1143,3 +1229,9 @@ $O(\sqrt p)$ in general if prime gaps are $O(\sqrt p)$.
 The epoch construction described under "Constructive route" is an earlier, unfinished attempt at
 a two-state version; it remains open until the local epoch factory, gap-to-mask transport, arena
 invariant and all-\(t\) handoff induction are complete.
+
+The strict on/off goal (2 states, the 8 neighbours, 2 starting cells; see "The strict on/off
+goal") is open. The best complete rule found matches 76 primes by memorising: it consults 485 of
+the 512 entries and has 398 cells instead of 389 at step 76. A provable rule would need machinery
+whose population is exactly predictable at every step. The constructive route gets that only by
+reading further than the 8 neighbours.

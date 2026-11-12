@@ -129,6 +129,8 @@ pub struct SearchReport {
     pub stored: Vec<Solution>,
     /// Deepest time step reached; deepest + 1 is the longest matched prefix of the target.
     pub deepest: usize,
+    /// The entries assigned on the way to that step: any completion reproduces deepest + 1 terms.
+    pub deepest_rule: Option<Solution>,
     pub elapsed: Duration,
 }
 
@@ -369,8 +371,17 @@ struct Level {
     scatter: Vec<(i64, u64)>,
     frontier: Vec<Front>,
     groups: Vec<Group>,
-    suffix: Vec<u32>,
+    /// reach[g * words ..][s] is set when the groups g.. can supply exactly s more set cells.
+    reach: Vec<u64>,
+    words: usize,
     need: u32,
+}
+
+impl Level {
+    fn reaches(&self, g: usize, sum: u32) -> bool {
+        let s = sum as usize;
+        s <= self.need as usize && (self.reach[g * self.words + s / 64] >> (s % 64)) & 1 == 1
+    }
 }
 
 /// A search-tree node that can be rebuilt on any thread.
@@ -386,6 +397,8 @@ struct Stats {
     solutions: u64,
     weighted: BTreeMap<u64, u128>,
     stored: Vec<Solution>,
+    /// The entries assigned on the way to the deepest step reached, with that step.
+    deepest_trail: Option<(usize, Vec<(bool, u64, bool)>)>,
 }
 
 struct Searcher<'a> {
@@ -407,6 +420,8 @@ struct Searcher<'a> {
     weighted: BTreeMap<u64, u128>,
     stored: Vec<Solution>,
     deepest: usize,
+    deepest_trail: Option<(usize, Vec<(bool, u64, bool)>)>,
+    choose_calls: u64,
 }
 
 impl<'a> Searcher<'a> {
@@ -430,6 +445,8 @@ impl<'a> Searcher<'a> {
             weighted: BTreeMap::new(),
             stored: vec![],
             deepest: 0,
+            deepest_trail: None,
+            choose_calls: 0,
         }
     }
 
@@ -440,6 +457,7 @@ impl<'a> Searcher<'a> {
             solutions: self.solutions,
             weighted: self.weighted,
             stored: self.stored,
+            deepest_trail: self.deepest_trail,
         }
     }
 
@@ -524,6 +542,9 @@ impl<'a> Searcher<'a> {
         self.local_nodes += 1;
         if t > self.deepest {
             self.deepest = t;
+            if self.deepest_trail.as_ref().is_none_or(|(d, _)| t > *d) {
+                self.deepest_trail = Some((t, self.trail.clone()));
+            }
             let ctx = self.ctx;
             if let Some(progress) = &ctx.progress {
                 progress.offer_deepest(t, || self.preview(t));
@@ -616,26 +637,49 @@ impl<'a> Searcher<'a> {
         let target = ctx.target[t + 1];
         let feasible = known <= target && {
             level.need = (target - known) as u32;
-            level.suffix.clear();
-            level.suffix.resize(level.groups.len() + 1, 0);
+            let words = level.need as usize / 64 + 1;
+            level.words = words;
+            level.reach.clear();
+            level.reach.resize((level.groups.len() + 1) * words, 0);
+            level.reach[level.groups.len() * words] = 1;
             for g in (0..level.groups.len()).rev() {
-                level.suffix[g] = level.suffix[g + 1] + level.groups[g].count;
+                let shift = level.groups[g].count as usize;
+                let (head, tail) = level.reach.split_at_mut((g + 1) * words);
+                let (dst, src) = (&mut head[g * words..], &tail[..words]);
+                dst.copy_from_slice(src);
+                let (whole, part) = (shift / 64, shift % 64);
+                for w in (whole..words).rev() {
+                    let mut moved = src[w - whole] << part;
+                    if part > 0 && w > whole {
+                        moved |= src[w - whole - 1] >> (64 - part);
+                    }
+                    dst[w] |= moved;
+                }
             }
-            level.suffix[0] >= level.need
+            level.reaches(0, level.need)
         };
         self.levels[t] = level;
         feasible
     }
 
     /// Decides the undecided entries of level `t` one group at a time so that exactly `remaining`
-    /// more cells become set.
+    /// more cells become set. A choice is only made if the later groups can still make up exactly
+    /// the rest, so every branch ends in a child.
     fn choose(&mut self, t: usize, i: usize, remaining: u32, stab: &[u16]) {
-        let (group, suffix, group_count) = {
+        self.choose_calls += 1;
+        if self.choose_calls % (1 << 16) == 0 {
+            if let Some(deadline) = self.ctx.deadline {
+                if Instant::now() >= deadline {
+                    self.ctx.request_stop(StopReason::TimeLimit);
+                }
+            }
+        }
+        let group = {
             let level = &self.levels[t];
             if i == level.groups.len() {
-                (None, 0, 0)
+                None
             } else {
-                (Some(level.groups[i]), level.suffix[i], level.groups.len())
+                Some(level.groups[i])
             }
         };
         let group = match group {
@@ -647,21 +691,22 @@ impl<'a> Searcher<'a> {
                 return;
             }
         };
-        let _ = group_count;
-        if suffix < remaining || self.ctx.stop.load(Ordering::Relaxed) {
+        if self.ctx.stop.load(Ordering::Relaxed) {
             return;
         }
         if self.trail.len() >= self.ctx.max_entries {
             return;
         }
-        if group.count <= remaining {
+        if group.count <= remaining && self.levels[t].reaches(i + 1, remaining - group.count) {
             self.assign(group.is_set, group.mask, true);
             self.choose(t, i + 1, remaining - group.count, stab);
             self.unassign();
         }
-        self.assign(group.is_set, group.mask, false);
-        self.choose(t, i + 1, remaining, stab);
-        self.unassign();
+        if self.levels[t].reaches(i + 1, remaining) {
+            self.assign(group.is_set, group.mask, false);
+            self.choose(t, i + 1, remaining, stab);
+            self.unassign();
+        }
     }
 
     /// All entries of level `t` are decided: derive the next configuration, apply the symmetry
@@ -781,6 +826,7 @@ fn merge_stats(all: Vec<Stats>, depth: usize) -> Stats {
         solutions: 0,
         weighted: BTreeMap::new(),
         stored: vec![],
+        deepest_trail: None,
     };
     for stats in all {
         for (slot, value) in merged.nodes_by_depth.iter_mut().zip(&stats.nodes_by_depth) {
@@ -791,6 +837,11 @@ fn merge_stats(all: Vec<Stats>, depth: usize) -> Stats {
             *merged.weighted.entry(free).or_insert(0) += weight;
         }
         merged.stored.extend(stats.stored);
+        if let Some((t, trail)) = stats.deepest_trail {
+            if merged.deepest_trail.as_ref().is_none_or(|(d, _)| t > *d) {
+                merged.deepest_trail = Some((t, trail));
+            }
+        }
     }
     merged
 }
@@ -831,6 +882,25 @@ pub fn search(params: &SearchParams) -> Result<SearchReport, String> {
 
     let stop_reason = *ctx.stop_reason.lock().unwrap();
     let deepest = stats.nodes_by_depth.iter().rposition(|&n| n > 0).unwrap_or(0);
+    let deepest_rule = stats.deepest_trail.map(|(_, trail)| {
+        let mut solution = Solution {
+            birth: vec![],
+            survival: vec![],
+            orbit: 1,
+            classifier: ctx.classifier.clone(),
+            seed: ctx.seed.clone(),
+        };
+        for (is_set, mask, value) in trail {
+            if is_set {
+                solution.survival.push((mask, value));
+            } else {
+                solution.birth.push((mask, value));
+            }
+        }
+        solution.birth.sort_unstable();
+        solution.survival.sort_unstable();
+        solution
+    });
     let mut stored = stats.stored;
     stored.truncate(params.store_limit);
     let report = SearchReport {
@@ -841,6 +911,7 @@ pub fn search(params: &SearchParams) -> Result<SearchReport, String> {
         weighted: stats.weighted,
         stored,
         deepest,
+        deepest_rule,
         elapsed: started.elapsed(),
     };
     if let Some(progress) = &ctx.progress {

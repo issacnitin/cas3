@@ -62,6 +62,8 @@ COMMANDS:
               Prints the consecutive primes that rule out every rule of a given light cone
     next-prime  From p lit cells and nothing else to exactly the next prime: a 2D rule taking about
               sqrt(p) steps (no rule can be much faster), checked by direct runs
+    onoff     The strict goal: one on/off rule on the 3x3 neighbourhood, two lit cells at the
+              start, the next prime after every step. Verify a rule (--rule) or search for one
     sweep     Symmetric families (Life-like, von Neumann totalistic and isotropic) in any
               dimension up to 21, from every starting pattern: the longest run of primes
     space     Compare the legacy search-space size with the new one, per dimension
@@ -209,6 +211,18 @@ OPTIONS (next-prime):
                                                                           [default: 100000000]
     --show P                draw the run for one p (at most 5000) before and after it settles
 
+OPTIONS (onoff):
+    --rule HEX              a complete rule: 128 hex digits, digit i holds the entries of patterns
+                            4i..4i+3, lowest bit first; bit (dy+1)*3+(dx+1) of a pattern is the
+                            cell at offset (dx, dy)
+    --seed CELLS            the two starting cells                         [default: \"0,0;1,0\"]
+    --terms N               primes to check (or to search for)                  [default: 10000]
+    --search                search every starting pair for a rule matching --terms primes, then
+                            print each one found as a complete rule (open entries off); with
+                            --seed, search from that pair only. If none matches every term, the
+                            rule that got furthest is printed
+    --time-limit SECS       per starting pair, with --search                       [default: 300]
+
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
 
@@ -222,7 +236,7 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 14] = [
+const FLAG_NAMES: [&str; 15] = [
     "no-symmetry",
     "first",
     "sequential",
@@ -237,6 +251,7 @@ const FLAG_NAMES: [&str; 14] = [
     "show-rule",
     "profile",
     "records",
+    "search",
 ];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -1764,6 +1779,137 @@ fn run_next_prime(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `onoff`: the strict goal. Verify a complete on/off rule from two cells, or search for one.
+fn run_onoff(opts: &Options) -> Result<(), String> {
+    use crate::analysis::any_start_search;
+    use crate::onoff::{first_primes, run, OnOffRule};
+    let terms = opts.number::<usize>("terms")?.unwrap_or(10_000);
+    if !(2..=100_000).contains(&terms) {
+        return Err("need 2 <= --terms <= 100000".into());
+    }
+    let describe = |rule: &OnOffRule, seed: &[(i64, i64)], terms: usize| {
+        let verdict = run(rule, seed, terms);
+        let primes = first_primes(verdict.matched.max(1) + 1);
+        println!(
+            "  matches the first {} primes (2 .. {}) as a complete rule{}",
+            verdict.matched,
+            primes[verdict.matched.max(1) - 1],
+            if verdict.matched < terms {
+                format!(
+                    "; at step {} it has {} lit cells instead of {}",
+                    verdict.matched, verdict.counts[verdict.matched], primes[verdict.matched]
+                )
+            } else {
+                String::new()
+            }
+        );
+        verdict
+    };
+    if !opts.flag("search") {
+        let rule = OnOffRule::from_hex(&opts.text("rule", ""))
+            .map_err(|e| format!("--rule: {} (or use --search)", e))?;
+        if !rule.is_quiescent() {
+            return Err("this rule lights up empty space (entry 0 is on)".into());
+        }
+        let cells = parse_cell_list(&opts.text("seed", "0,0;1,0"))?;
+        let mut seed: Vec<(i64, i64)> = cells
+            .iter()
+            .map(|c| match c[..] {
+                [x, y] => Ok((x as i64, y as i64)),
+                _ => Err("--seed needs 2D cells".to_string()),
+            })
+            .collect::<Result<_, _>>()?;
+        seed.sort();
+        seed.dedup();
+        if seed.len() != 2 {
+            return Err("--seed needs exactly two different cells".into());
+        }
+        println!(
+            "rule with {} of 512 entries on, from {:?}:",
+            rule.on_entries(),
+            seed
+        );
+        let verdict = describe(&rule, &seed, terms);
+        if verdict.matched == terms {
+            println!(
+                "  all {} primes matched (a finite check, not a proof)",
+                terms
+            );
+        }
+        return Ok(());
+    }
+    let nb = Neighbourhood::moore(2, 1)?;
+    let mut params = SearchParams::new(nb.clone(), first_primes(terms));
+    params.find_first = true;
+    params.time_limit = Some(Duration::from_secs(
+        opts.number::<u64>("time-limit")?.unwrap_or(300),
+    ));
+    println!(
+        "searching every on/off rule on the 3x3 neighbourhood (2^511 rules) from {}\nfor the first {} primes (2 .. {}), at most {} s per pair",
+        match opts.values.get("seed") {
+            Some(list) => format!("the pair {}", list),
+            None => "every starting pair".to_string(),
+        },
+        terms,
+        params.target[terms - 1],
+        params.time_limit.unwrap().as_secs()
+    );
+    let mut found = 0;
+    let mut report_run = |label: &str, seed_cells: &[Vec<i32>], report: &SearchReport| {
+        println!(
+            "pair {}: longest run {} primes, {} nodes, {:.1?}{}",
+            label,
+            report.matched_terms(),
+            report.nodes,
+            report.elapsed,
+            if report.complete() { "" } else { " (limit)" }
+        );
+        let candidates: Vec<&crate::table_search::Solution> = if report.stored.is_empty() {
+            report.deepest_rule.iter().collect()
+        } else {
+            report.stored.iter().collect()
+        };
+        for solution in candidates {
+            match OnOffRule::from_solution(&nb, solution) {
+                Ok(rule) => {
+                    found += 1;
+                    let seed: Vec<(i64, i64)> = seed_cells
+                        .iter()
+                        .map(|c| (c[0] as i64, c[1] as i64))
+                        .collect();
+                    println!(
+                        "  rule consulting {} of 512 entries, from {:?}:",
+                        solution.birth.len() + solution.survival.len(),
+                        seed
+                    );
+                    describe(&rule, &seed, terms + 1000);
+                    println!("  --rule {}", rule.to_hex());
+                }
+                Err(e) => println!("  {}", e),
+            }
+        }
+    };
+    if let Some(list) = opts.values.get("seed") {
+        let mut cells = parse_cell_list(list)?;
+        cells.sort();
+        cells.dedup();
+        if cells.len() != 2 || cells.iter().any(|c| c.len() != 2) {
+            return Err("--seed needs exactly two different 2D cells".into());
+        }
+        params.seed = cells.clone();
+        let report = search(&params)?;
+        report_run(&format!("{:?}", cells), &cells, &report);
+    } else {
+        any_start_search(&params, |pair| {
+            report_run(&format!("{:?}", pair.offset), &pair.seed, &pair.report)
+        })?;
+    }
+    if found == 0 {
+        println!("no rule found within the limits");
+    }
+    Ok(())
+}
+
 /// `sweep`: symmetric families from every starting pattern, dimension by dimension.
 fn run_sweep(opts: &Options) -> Result<(), String> {
     use crate::dimension_sweep::{sweep, Family, MAX_SWEEP_DIM};
@@ -2257,6 +2403,7 @@ pub fn run() {
         "multistate" => parse_options(&args[1..]).and_then(|o| run_multistate(&o)),
         "constant-time" => parse_options(&args[1..]).and_then(|o| run_constant_time(&o)),
         "next-prime" => parse_options(&args[1..]).and_then(|o| run_next_prime(&o)),
+        "onoff" => parse_options(&args[1..]).and_then(|o| run_onoff(&o)),
         "demo" => parse_options(&args[1..]).and_then(|o| run_demo(&o)),
         "primeca" => parse_options(&args[1..]).and_then(|o| run_primeca(&o)),
         "primecols" => parse_options(&args[1..]).and_then(|o| run_primecols(&o)),
