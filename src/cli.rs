@@ -52,6 +52,7 @@ COMMANDS:
     rolling   Recurrently classify stride-partitioned batches under one local CA rule
     epoch     Print the conservative dyadic coverage and population resource check
     mask      Decode one binary split count and commit a synchronized prime output
+    demo      Watch the prime-counting automaton in the terminal (or draw it as an animated SVG)
     primeca   Run the 2D prime-counting automaton (64-bit cells) from one set cell and check
               that the number of set cells is the next prime after every step
     primecols Run the 3D finite-alphabet version (numbers as digit columns) and check it
@@ -150,6 +151,13 @@ OPTIONS (sweep):
     --node-limit N          search nodes per family and dimension      [default: 50000000]
     --max-offsets N         skip Moore families with more neighbours   [default: 200000]
 
+OPTIONS (demo):
+    --rows N                rows in the zoomed-out view, 2..120                 [default: 64]
+    --speed X               animation speed factor                             [default: 1]
+    --plain                 no colours or animation: print frames one after the other
+                            (the default when the output is not a terminal)
+    --svg FILE              write the animation as an SVG file instead (docs/demo.svg)
+
 OPTIONS (primeca):
     --steps N               steps to simulate and check                 [default: 1000]
     --report N              print every N steps                       [default: steps/10]
@@ -177,7 +185,7 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 9] = [
+const FLAG_NAMES: [&str; 10] = [
     "no-symmetry",
     "first",
     "sequential",
@@ -187,6 +195,7 @@ const FLAG_NAMES: [&str; 9] = [
     "any-start",
     "direct",
     "certificate",
+    "plain",
 ];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -952,6 +961,41 @@ fn run_scan(opts: &Options) -> Result<(), String> {
     }
     hold_dashboard(opts, &progress);
     Ok(())
+}
+
+/// `demo`: the prime-counting automaton in the terminal, or as an animated SVG.
+fn run_demo(opts: &Options) -> Result<(), String> {
+    use std::io::IsTerminal;
+    let rows = opts.number::<u64>("rows")?.unwrap_or(64);
+    if !(2..=120).contains(&rows) {
+        return Err("--rows must be between 2 and 120".into());
+    }
+    let recording = crate::demo::record(rows);
+    let path = opts.text("svg", "");
+    if !path.is_empty() {
+        let svg = crate::demo::svg(&recording);
+        std::fs::write(&path, &svg).map_err(|e| format!("cannot write {}: {}", path, e))?;
+        println!(
+            "wrote {} ({} rows, steps 0..={}, {} KB)",
+            path,
+            rows,
+            recording.steps(),
+            svg.len() / 1024
+        );
+        return Ok(());
+    }
+    let speed = opts.number::<f64>("speed")?.unwrap_or(1.0);
+    if !(speed > 0.0 && speed.is_finite()) {
+        return Err("--speed must be a positive number".into());
+    }
+    let options = crate::demo::PlayOptions {
+        speed,
+        plain: opts.flag("plain") || !std::io::stdout().is_terminal(),
+        lines: crate::demo::terminal_lines()
+            .filter(|&lines| lines > 0)
+            .unwrap_or(40),
+    };
+    crate::demo::play(&recording, &options).map_err(|e| e.to_string())
 }
 
 /// `primeca`: run the prime-counting automaton and check the number of set cells at every step.
@@ -1734,6 +1778,7 @@ pub fn run() {
         "mask" => parse_options(&args[1..]).and_then(|o| run_mask(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "sweep" => parse_options(&args[1..]).and_then(|o| run_sweep(&o)),
+        "demo" => parse_options(&args[1..]).and_then(|o| run_demo(&o)),
         "primeca" => parse_options(&args[1..]).and_then(|o| run_primeca(&o)),
         "primecols" => parse_options(&args[1..]).and_then(|o| run_primecols(&o)),
         "legacy" => parse_options(&args[1..]).and_then(|o| run_legacy(&o)),

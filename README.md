@@ -1,738 +1,257 @@
-## CAS3 - Cellular Automata State Space Search for Prime Generation
+# CAS3: can a cellular automaton count out the primes?
 
-Prime numbers are intriguing, they compose all other numbers. Cellular automata is a computational paradigm which has a simple set of rules, works in an N-dimensional grid with a start state, and rules being applied iteratively to every cell in parallel. The rules have input as a cell's immediate neighbours, and output as a state of the cell. For simplicity, the state can be thought of as ON or OFF.
+<p align="center">
+  <img src="docs/demo.svg" width="624" alt="Animation of the automaton: a triangle of cells, one per number, fills up with gold so that the number of lit cells is always the next prime, while the cells above it work out whether they are prime">
+</p>
 
-This project attempts to figure out if there is an N-dimensional cellular automata which will generate the prime number sequence. The resulting cell-cluster would combine to form all other numbers in our universe!  
+A **cellular automaton** is a grid of cells that all follow the same rule. At every step, each
+cell looks at its immediate neighbours and decides what to become next. The best-known example is
+Conway's Game of Life.
 
-This project is not computationaly feasible, and is hence a learning project. Contributions are welcome, if you think you can make it do the search faster, do ping me or send in a PR.
+This project asks a simple question:
 
-I found it generating rules for sequence such as :
-<br/>1,2,3,4..
-<br/>1,3,5,7..
-<br/>1,4,9,16,25,36..
-<br/>The most interesting I've found has been 1, 3, 5, 9, 11, 15, 19, 27
-
-![](./example.gif)
-
-### Space
-Start with one cell, apply rules. If successful, the applied rules would produce blocks of cells which are set, and the number of cells in such a block would be prime numbers :D
-
-### Cell
-N-dimensional vector (Co-ordinates) + Value. Value is either Set or Unset
-
-### Rule
-
-One rule specifies which neighbours to check, what check to be done and what rule should be applied.
-
-Which neighbours to check -  This is defined by the "elements" vector, where each element has 3 values: SameCoordinate, Positive, Negative
-As expected of the naming, when this rule is checked against a cell, it'll check it's neighbours, changing ith coordinate accordingly (SameCoordinate - no change, Positive - +1, Negative - -1)
-
-What check to be done – Is whether the specified neighbours are set or not set. Rule has ExpectedCellValue which checks if the neighbours are as expected
-
-What rule should be applied – Is whether the corresponding cell should be set, unset or flipped in value. RuleResult does this.
-
-
-### Dimensions
-
-Number of dimensions of the universe is unknown. We need to generate for increasing numbers, starting at 3 (since we live in 3 dimensions)
-
-
-State space search:
-Stop the search if successive applications of rule is not producing the next prime number in sequence (1,2,3,5,7,11,13...)
-
-### Search Space Pruning (legacy expression search)
-
-Following techniques has been applied to reduce the search space of the original expression-tree enumeration (`legacy` command). The rule-table search below goes a lot further.
-
-* We generating boolean expressions of N variables, would only generate half the tree. The other half is symmetric, and gets 
-handled by the permutation we apply to input variables. So for three variables, we generate from `(A AND B AND C)` to `(A AND (B OR C))`, we won't generate `((A OR B) AND C)`
-* Input variables are clustered if they share the same op next to each other. For ex. `(A AND (B AND C))` clusters `[A,B,C]`. `(A AND (B OR C))` clusters as `[[A],[B,C]]`. These are clustered as the variables can be changed with each other without affecting output for the expression, so no value in permuting on them.
-* We generate permutation of input variables based on clusters. So we generate `[[B],[A,C]]`, `[[C],[B,A]]` but not `[[A],[C,B]]`.
-* Since we generate all boolean expressions, for cases like `(A AND (NOT B OR C))`, even if we are not permuting (A, B), we will search for the rule `(A AND (B OR NOT C))` as well
-* Not exploring rules with action "Unset", they are lame
-
-## Reducing the search space: exact rule-table search
-
-The expression enumeration walks a *syntactic* space: formulas and input permutations. The `space` command shows how fast it grows (before the input permutations tried for each structure):
-
-| dimension | inputs (3^N) | expression structures per boolean function | (birth, survival) pairs | unrestricted tables |
-|---|---|---|---|---|
-| 1 | 3 | 32 | 1,024 | 2^7 |
-| 2 | 9 | 6,160,384 | 37,950,331,027,456 | 2^511 |
-| 3 | 27 | 1,077,835,798,265,866,175,381,504 | > 3.4e38 | 2^134,217,727 |
-
-The new `search` engine (`src/table_search.rs`) works on the *semantic* space instead. A rule is a pair of lookup tables over neighbour patterns (BIRTH for an unset cell, SURVIVAL for a set cell). The CA is simulated from the single seed cell, and a table entry is only decided the first time the simulation needs it. Each node of the search tree is therefore one distinct trajectory, and a partial table stands for every full rule that agrees with it. Everything below is exact (no heuristics) unless it says otherwise.
-
-| technique | what it removes | measured |
-|---|---|---|
-| **Prefix pruning** | a step must produce exactly the next target count, so only entry combinations that sum to it are generated | 2D Moore, first 6 primes: 9.8 million rule classes covering ~2^498.7 of the 2^511 rules, found by visiting 9.86 million nodes in 0.16 s |
-| **Lazy tables** | rules that differ only in entries the simulation never consults are one node, not 2^N | one failed simulation discards a whole family of rules |
-| **Quiescent space, cell is not an input** | the all-zero birth entry (empty space stays empty) and the always-known own state | tables over the 3^N − 1 neighbours instead of 3^N inputs per function |
-| **Lattice symmetry** | rules whose evolutions are mirror images have identical counts, so only the lexicographically smallest trajectory prefix in each orbit is explored (works for any neighbourhood, with its own symmetry group: orders 2, 8, 48) | 7.97× – 8.00× fewer nodes in 2D (group order 8): 215,649 → 27,057 (5 terms), 78.8 M → 9.86 M (6 terms) |
-| **Entry bound** (`--max-entries`) | only rules that consult at most E table entries; exhaustive search for the simplest rule | 2D Moore, 7 primes: exhaustive in 5,858 nodes at E ≤ 28, versus > 3.3 billion nodes unbounded |
-| **Smaller neighbourhoods** (`scan`, `--neighbourhood vonneumann`, `--offsets`) | rules that depend on at most r neighbours, one representative per symmetry orbit of neighbour subsets | all 2D rules using ≤ 4 neighbours: 13 classes, 1,496 nodes, a few milliseconds |
-| **Parallelism** | top of the tree split over rayon workers | 5.2× on 10 cores (0.93 s → 0.18 s) |
-
-### How the reductions were validated
-
-* Search vs exhaustive enumeration: for neighbourhoods small enough to enumerate every full rule, the number of rules matching a target (the sum of 2^free-entries over solutions, weighted by symmetry orbit size) equals a brute-force count made with an independent bounded-grid simulator. Covered: symmetry groups of order 1, 2 and 8, all three survival modes, with and without symmetry, sequential and parallel.
-* One-off exhaustive check over **all 2^31 rules** of the planar von Neumann class (`cargo test --release -- --ignored`, about 7 minutes): 33,554,432 rules match 1, 2, 3, 5 (the search reports the same number) and none match 1, 2, 3, 5, 7.
-* Symmetric and non-symmetric searches produce identical rule-count histograms in 2D (order 8) and 3D (order 48, dense and sparse tables).
-* The grid simulator agrees with a naive reference simulator, which agrees with the original `Space` engine on 2,800 random expression rule sets (`state_explorer` test).
-* Every solution printed by the CLI is re-simulated by the reference engine, also with random completions of the entries it did not consult.
-
-### How to read the results: description length
-
-An unrestricted lookup table can fit any short prefix. In 2D with the Moore neighbourhood the search finds a rule for all 10 first primes in under a millisecond, but it consults 96 table entries to do it: it memorises. So "does a rule exist" is not the interesting question. `profile` asks how many table entries a rule *must* consult to reproduce the first L terms (the exact minimum, by iterative deepening on the entry bound). A rule that really generates a sequence makes this curve flatten; a memoriser needs more entries for every extra term. 2D Moore, free survival:
-
-| terms reproduced | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1, 2, 3, 4, … | 9 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 |
-| 1, 3, 5, 7, … | 9 | 14 | 14 | 14 | 14 | 14 | 14 | 14 | 14 | 14 | 14 | 14 |
-| 1, 4, 9, 16, … | 9 | 16 | 16 | 16 | 16 | 16 | 16 | 16 | 16 | 16 | 16 | 16 |
-| **primes 1, 2, 3, 5, 7, 11, …** | 9 | 10 | 14 | 19 | 23 | 29 | 31 | 33 | 33 | 41 | 45 | 48 |
-
-The sequences that simple CAs generate plateau at once (the 10-entry rule for 1, 2, 3, 4, … is a diagonal line growing both ways); the primes keep growing by about 3.5 entries per term. Counts that double every step (1, 2, 4, 8, …) cannot continue past 9 terms in 2D (a cluster has at most (2t+1)² cells at time t), and the profile shows the cost exploding long before that: 9, 11, 18, 26, 42 entries for 2 to 6 terms, and more than 57 for 7 terms (not settled within the time limit).
-
-### Results
-
-All results are for the first terms of 1, 2, 3, 5, 7, 11, 13, … (the seed counts as the first term) and exhaustive, unless marked partial.
-
-* **1D, radius 1 (3 cells):** no rule reproduces more than 1, 2, 3 (all 2^7 rules, 5 nodes). Radius 2 reaches exactly 10 terms (1 … 23) and nothing beyond; radius 3 reaches at least 26 within a 60 s cap (partial).
-* **Axis-only neighbourhood (von Neumann), dimensions 2 to 6:** no rule reproduces more than 1, 2, 3, 5. More dimensions do not help.
-* **Rules depending on at most r neighbours of the Moore neighbourhood (`scan`),** every class exhausted, so every entry is a proven "dead" verdict (no rule in the class reproduces more terms):
-
-  | r | 1 | 2 | 3 | 4 | 5 |
-  |---|---|---|---|---|---|
-  | longest prime prefix, **2D** (3×3 block) | 3 | 3 | 5 | 10 | 22 |
-  | longest prime prefix, **3D** (3×3×3 block) | 3 | 3 | 5 | 10 | not run |
-  | neighbour classes (2D / 3D) | 2 / 3 | 6 / 17 | 10 / 84 | 13 / 399 | 10 / – |
-
-  The r = 5 row took 165 s and 298 million nodes (`scan --dim 2 --min-arity 5 --max-arity 5 --terms 40`): one class reaches 22 terms, three reach 21, five reach 20 and one stops at 10. The third dimension does not buy any extra terms at a fixed number of neighbours, and the capacity roughly doubles with every extra neighbour. Neighbours do not have to be adjacent: drawing them from a larger block (`--universe-radius R`, 2D) barely changes the picture.
-
-  | neighbours drawn from the block of radius R | r = 1 | r = 2 | r = 3 | r = 4 | classes at r = 4 |
-  |---|---|---|---|---|---|
-  | 1 (3×3) | 3 | 3 | 5 | 10 | 13 |
-  | 2 (5×5) | 3 | 3 | 5 | 12 | 1,391 |
-  | 3 (7×7) | 3 | 3 | 6 | 12 | 24,630 |
-  | 4 (9×9) | 3 | 3 | 6 | 14 | 198,654 |
-  | 5 (11×11) | 3 | 3 | 6 | 14 | 1,029,135 |
-* **Cells that never die (survival always on), full 2D Moore neighbourhood:** nothing beyond 1, 2, 3, 5, 7, 11, over all 2^255 birth tables (9 nodes). Cells that die after every step form a far richer class: at least 34 terms (partial), and its minimal rule size still grows (8, 9, 13, 17, 20, 25, 27, 29, 29, 37, 41, 44, 46, 49, 54, 55 entries for 2 … 17 terms).
-* **Description length per geometry (primes, entries needed for L = 2, 3, …):**
-  1D radius 2: 5, 6, 9, 14, 19, 22, 22, 22, 22, then no rule; 1D radius 3: 7, 8, 12, 18, 22, 30, 30, 30, 30, 42;
-  2D Moore: 9, 10, 14, 19, 23, 29, 31, 33, 33, 41, 45, 48; 3D Moore: 27, 28, 32, 41, 53, 65, 67.
-  No flat tail was found in any class: prefixes of the primes can be fitted, but no compact generator.
-
-The project's original question (is there a dimension in which a rule generates the whole prime sequence?) is not settled by this: it is a prefix test within the classes above, the classes beyond them are astronomically larger, and a flat profile in some unexplored class would be the sign to look for.
-
-### Usage
+> Is there a rule, in some number of dimensions, so that if you start with one lit cell and keep
+> applying the rule, the number of lit cells is always the next prime?
 
 ```
-cargo run --release -- help
-cargo run --release -- search  --dim 2 --terms 10 --first          # any 2D rule for the first 10 primes
-cargo run --release -- search  --dim 3 --neighbourhood vonneumann  # longest prime prefix, exhaustive
-cargo run --release -- profile --dim 2 --terms 13                  # minimal rule size per prefix length
-cargo run --release -- profile --dim 2 --target squares --terms 12 # a control sequence
-cargo run --release -- scan    --dim 2 --max-arity 4 --terms 10    # every rule using at most 4 neighbours
-cargo run --release -- construct --steps 5000 --show 8             # weighted prime-gap accounting certificate
-cargo run --release -- worker --candidate 97                       # autonomous distributed trial division
-cargo run --release -- candidate --candidate 97                    # 2D parallel divisor tile
-cargo run --release -- pipeline --start 4 --lanes 2 --steps 220     # ordered CA-classification diagnostic
-cargo run --release -- space   --max-dim 3                         # legacy search-space sizes
-cargo run --release -- legacy  --min-dim 1 --max-dim 1             # the original expression search (dimension 2 needs ~3.8e13 expression pairs and is refused unless --force)
+step        0   1   2   3   4   5    6    7    8    9    10   ...
+lit cells   1   2   3   5   7   11   13   17   19   23   29   ...
 ```
 
-Add `--dashboard 8787 --hold` to `search`, `profile` or `scan` and open `http://127.0.0.1:8787` for a live monitor (loopback only): nodes per second, nodes per time step, how much of the target the best rule so far reproduces, the evolution of that rule, and the history of finished steps. `--time-limit`, `--node-limit` and `--max-entries` bound a run; an unbounded `search` on a large neighbourhood can run for a very long time.
+## The short answer
 
-### Scope and caveats
+- **No simple rule does it.** We searched every rule in many families of simple rules (the
+  Game of Life is one of them), from every possible starting pattern, on square, hexagonal and
+  cubic grids and in up to 21 dimensions. The best simple rule follows the primes as far as 2, 3,
+  5, 7, 11, 13, 17 and then gives 21. Rules that match longer stretches only manage it by
+  memorising the list.
+- **A rule that does it exists, and we built one.** It is the animation above, and it works in two
+  dimensions. Its cells do more than switch on and off: each one quietly works out whether its
+  number is prime, and exactly when its turn comes to light up.
+- **A three-dimensional version stays exact forever**, with only a limited amount of information
+  in each cell. A two-dimensional version could most likely do the same, but hasn't been built.
+- **One dimension is impossible**, for any rule at all: a line of cells can't grow fast enough.
 
-* A rule is a birth table and a survival table over the neighbours of a cell (the cell's own state selects the table). A single seed cell (or `--seed` / `--any-start`), synchronous updates and an empty quiescent background are assumed. The legacy `Space` engine only updates cells it has materialised, so a birth table that fires on an empty neighbourhood behaves differently there; those rules are outside the new engine's model.
-* Matching a prefix is not a proof about the infinite sequence. Negative results are exact for the class and the prefix length that were searched.
-* Limits: at most 62 neighbours (so the Moore neighbourhood up to 3 dimensions), symmetry reduction up to dimension 5, and `scan` up to dimension 5.
-* Tests: `cargo test --release` (the legacy 2D test is slow); `cargo test --release -- --ignored` adds the 2^31 brute force.
+## Demo
 
-## Can any class generate the whole prime sequence?
+The animation at the top is drawn straight from the real rule. In it:
 
-A finite search can never verify an infinite sequence, but it can *exclude* classes. A rule that generates the whole sequence reproduces every prefix, so if an exhaustive search proves that no rule of a class reproduces more than L* terms, the class contains no generator. Call such a class **dead**; `scan` prints this verdict.
+- every square is one number: 1 is at the bottom left, the next row holds 2 and 3, the next 4, 5
+  and 6, and so on;
+- **gold** cells are lit, and they are the ones being counted. After step n, the cells from 1 up to
+  the n-th prime are lit;
+- **white** cells lit up in this very step: each step lights the stretch up to the next prime;
+- **blue** cells already know the exact step at which they will light up;
+- the cells above the "end of the table" mark work this out for themselves. **Dark grey** means
+  still testing divisors, then comes **grey** (not prime) or **orange** (prime), then blue. The
+  rows below the mark take their timing from a small table built into the rule (see below).
 
-### Two meanings of "generates the primes"
-
-* **Population** (what this project asks): the number of set cells after t steps is the t-th prime, 1, 2, 3, 5, 7, ….
-* **Time signal** (the classical meaning): one designated cell is ON at step t exactly when t is prime. Fischer (1965) showed that a one-dimensional cellular automaton can do this in real time, and Korec (1997, *Real-time generation of primes by a one-dimensional cellular automaton with 11 states*) reduced it to 11 states with radius 1 and to **2 states with radius 12**, starting from a single non-quiescent cell. In Conway's Life, a binary 2D rule with 8 neighbours (so a member of this project's own 2D Moore class), Dean Hickerson's Primer (1991, 2,953 cells) lets a lightweight spaceship escape at generation 120N + 100 exactly when N is prime.
-
-So for the signal reading the answer is already "yes". I know of no result for the population reading in either direction. The known generators are large: Korec's 11-state table has 11³ entries, about 4,600 bits, against 511 bits for the whole 2D Moore class; the largest classes this tool has exhausted have 63 entries (5 neighbours, free survival) and 255 entries (2D Moore, cells never die).
-
-### What can be said without any search (`src/bounds.rs`, tested)
-
-* **One dimension, any radius: impossible.** After t steps every set cell is within r·t of the seed, so the population is at most 2rt + 1. The t-th prime exceeds t·ln t (Rosser), which is at least (2r + 1)·t once t ≥ e^(2r+1). From dimension 2 the bound (2rt + 1)^d grows faster than the primes and excludes nothing.
-* **Symmetric rules in two or more dimensions, from one cell: impossible.** A rule invariant under the symmetries of the neighbourhood (totalistic, Life-like) births whole orbits of neighbours, and every orbit has at least 4 cells, so the population after one step is never 2.
-
-### Atlas of dead classes
-
-Every line is an exhaustive result (see Results above for the commands): 1D with any radius (theorem; radius 1 reaches 3 terms, radius 2 reaches 10); the axis-only neighbourhood in dimensions 2 to 6 (4 terms); rules using at most 5 neighbours of the 3×3 block in 2D (22 terms) and at most 4 in 3D (10 terms); at most 4 neighbours anywhere in a block up to 11×11 (14 terms, 1.07 million classes); the full 2D Moore neighbourhood with cells that never die (6 terms).
-
-The capacity of a class grows with its table size and hardly with the geometry (2D: 3, 3, 5, 10, 22 terms for 1 … 5 neighbours), and the minimal rule size for a prime prefix keeps growing while that of 1, 2, 3, 4, …, the odd numbers or the squares stops growing at once. Nothing found so far behaves like a generator.
-
-### What is still open
-
-Classes that cannot be exhausted with this engine (the cost grew about 200,000 times from 4 to 5 neighbours): 6 or more neighbours, the full 2D Moore class with free survival or with cells that die every step, 3D beyond 4 neighbours, and anything with more than two states. For these the search can only fit prefixes. A positive answer for the population reading would have to be constructed (for instance by turning a time-signal generator into a population counter), not found by enumeration.
-
-## Looking for a simple rule, from any starting pattern
-
-A rule whose live-cell count "just happens" to be the primes would be a discovery only if it is
-**simple**: a rule that needs new table entries for every extra prime is memorising them, not
-generating them (see the description length above). Two additions extend the search to every
-place such a rule could be.
-
-**Simple rule classes** (`--class`, `src/rule_class.rs`). In an `isotropic` rule, patterns related
-by a rotation or reflection share one entry, so the rule looks the same in every direction
-(Hensel's isotropic rules: 101 entries for the 3×3 block). In a `totalistic` rule only the
-number of set neighbours counts, as in Life-like rules such as B3/S23 (17 entries). On the
-hexagonal lattice (`--neighbourhood hex`, axial coordinates) isotropy uses all 12 symmetries of
-the hexagon. The engine assigns one value per class and is otherwise unchanged.
-
-**Every starting pattern** (`--any-start`, or an explicit `--seed`; proofs in `src/bounds.rs`).
-The infinitely many finite starting patterns reduce to a few seeds:
-
-* *Pair reduction.* If the counts at two consecutive steps are 2 and 3, the first configuration
-  is two cells \(\{a,b\}\). If \(b-a\notin N_0-N_0\), where \(N_0\) is the neighbourhood plus the
-  cell itself, no cell reads both. Each cell then evolves alone as an identical copy, and the next
-  count is even, not 3. So any run 2, 3, 5, 7, … from any finite configuration, after any
-  transient, passes through a pair with \(b-a\in N_0-N_0\), and from then on the automaton
-  remembers nothing else. That leaves 12 pairs for the 3×3 block (5 up to symmetry) and 62 for
-  the cube (9 up to symmetry).
-* *Parity lemma.* Every isotropic or totalistic rule is unchanged by the point reflection
-  \(x\mapsto -x\). Take a pair whose midpoint is not a cell. The reflection through that midpoint
-  maps the pair to itself and fixes no cell, so the count stays even forever. Only pairs with an
-  even offset in every coordinate can reach 3.
-
-Validation:
-
-* Exact rule counts agree with brute force over every rule of small classes, for 1-, 2- and
-  3-cell seeds and for the isotropic, totalistic and hexagonal classes.
-* Symmetry reduction from a pair merges only equivalent rules.
-* An end-to-end test simulates every rule of three small classes from every small starting
-  configuration. It finds the longest run 2, 3, 5, … starting at any time, and that run equals
-  the `--any-start` result.
-
-### Simple classes, every starting pattern (exhaustive)
-
-| lattice and neighbourhood | class | entries | longest run of 2, 3, 5, 7, … |
-|---|---|---|---|
-| square, 3×3 | totalistic (Life-like) | 17 | 2, 3, 5 |
-| square, 3×3 | isotropic (Hensel) | 101 | 2, 3, 5 |
-| square, von Neumann | totalistic / isotropic | 9 / 11 | 2, 3 |
-| square, 5×5 and 7×7 | totalistic | 49 / 97 | 2, 3 |
-| hexagonal | totalistic | 13 | 2, 3, 5, 7, 11 (B2/S0234, then 15) |
-| hexagonal | isotropic | 25 | **2, 3, 5, 7, 11, 13, 17** (then 21) |
-| cube, 3×3×3 | totalistic | 53 | 2, 3 |
-| von Neumann, 3D / 4D / 5D | totalistic | 13 / 17 / 21 | 2, 3 |
-| von Neumann, 3D / 4D / 5D | isotropic | 19 / 29 / 41 | 2, 3 |
-| von Neumann, 6D | totalistic | 25 | 2, 3 |
-| cube, 3×3×3 | isotropic | 2,852,287 | ≥ 30 (partial, 300 s per pair) |
-| square, 5×5 | isotropic | 4,211,743 | ≥ 30 (partial, 300 s per pair) |
-
-Every class above the last two rows is dead for the whole sequence, from every starting pattern.
-Symmetry ties cells into groups that switch together, which makes small exact counts hard to hit.
-More dimensions or a larger radius make this worse, not better; the hexagonal lattice does best
-because its symmetric groups of cells are small.
-
-The last two classes are symmetric but not simple: each has millions of entries, enough to fit long
-prefixes. The 3D rule found for 30 primes (2 … 113) from the pair one cell apart consults 402
-entries (295 birth, 107 survival), about 13 per prime. That is memorising, like the
-unrestricted tables.
-
-Rules that read at most \(r\) neighbours (`scan --any-start`, every class exhausted) reproduce at
-most 2, 3, 5, 12 primes in 2D for \(r=1,\dots,4\), and 2, 3, 5 in 3D for \(r=1,2,3\). From one cell
-the corresponding figures are 2, 2, 4, 9 and 2, 2, 4.
-
-### Minimal rule size, every starting pattern
-
-`profile --any-start` reports, for the first \(L\) primes, the fewest table entries any rule needs
-from the best close pair, that is, from any starting pattern:
-
-| primes matched | 2, 3 | …5 | …7 | …11 | …13 | …17 | …19 | …23 | …29 | …31 | …37 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| square, 3×3 | 10 | 12 | 16 | 20 | 23 | 23 | 26 | 26 | 38 | 41 | 44 |
-| hexagonal | 8 | 10 | 14 | 19 | 20 | 24 | 24 | 24 | 34 | 39 | 42 |
-| cube, 3×3×3 | 28 | 30 | 40 | 43 | 51 | 51 | 57 | | | | |
-| hexagonal, isotropic | 3 | 6 | 9 | 10 | 11 | 16 | dead | | | | |
-| square 5×5, isotropic | 7 | 12 | 20 | 29 | 36 | 39 | 42 | 42 | ≤ 60 | | |
-| cube 3×3×3, isotropic | 5 | 12 | 18 | 25 | 31 | 35 | 38 | 38 | 46 | | |
-| control 2, 3, 4, 5, … (square) | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 |
-
-(Isotropic rows count isotropic entries, so only the shape of a row matters across classes.)
-
-Every row climbs, and the only flat stretch (17 or 19 to 23) is not about primes. The rules that reach 23 with 26 entries
-continue 25, 29, 31, 35, 37, …: they produce the numbers that are not multiples of 2 or 3. Those
-agree with the primes up to 23 and first differ at \(25=5^2\). No rule with at most 26 entries
-continues with 29 (exhaustive; test `the_cheapest_prime_prefix_from_a_pair_is_the_wheel_of_six`).
-Getting past 25 costs 12 more entries, and each later prime costs about three more.
-
-This is what memorising a sieve looks like. A fixed rule can build in a wheel for a few small
-primes, and each new prime square then needs new entries. The hexagonal rules that reach 17
-continue with 21, not 19.
-
-### Higher dimensions
-
-More dimensions give a rule more neighbours and more room. Each family was pushed up in dimension
-until it was settled, from every starting pattern.
-
-**Symmetric families, every dimension.** `sweep` (`src/dimension_sweep.rs`) is an independent
-lazy search that computes the class key directly: neighbour count for totalistic rules, and, for
-isotropic von Neumann rules, how many axes have one or both neighbours set. It needs no 64-bit
-pattern masks, so it reaches dimension 21. It agrees with the main engine wherever both run.
-
-| family | dimensions swept | longest run, every start |
-|---|---|---|
-| Life-like (Moore radius 1, totalistic) | 2 | 2, 3, 5 |
-| Life-like (Moore radius 1, totalistic) | 3–11 (up to 354,293 entries) | 2, 3 |
-| Moore radius 2, totalistic | 2–7 | 2, 3 |
-| von Neumann, totalistic and isotropic | 2–21 | 2, 3 |
-
-Two of these are theorems for every dimension (proofs in `src/bounds.rs`):
-
-* **Isotropic von Neumann rules, any \(d\ge 2\).** Reaching 3 forces the three-cell line
-  \(\{-e_1,0,e_1\}\) and forbids births on "one neighbour on one axis". Every cell next to that
-  line is of that kind, so the count never reaches 5.
-* **Life-like rules, any \(d\ge 3\).** Reaching 3 forces a three-cell line and births on 2
-  neighbours. The next step then gives birth to at least 12 cells at once, overshooting 5.
-
-So more dimensions make symmetric rules worse: they tie more cells together.
-
-**Unrestricted tables, more dimensions.**
-
-* Rules on the axis neighbours (von Neumann tables, every rule, every start) reproduce at most
-  2, 3, 5, …, 23 in every dimension from 2 to 10. That is the wheel of six again.
-* Their minimal rule size is the same curve shifted by exactly two entries per dimension: 6, 8,
-  10, 14, 18, 19, 23 entries for 2 … 19 in 2D, then +2, +4, +6, +8 in 3D–6D (exact, tested
-  up to 5D).
-* Rules that read at most \(r\) neighbours of the \(3^d\) block (`scan --any-start`, exhaustive)
-  reproduce 2, 3, 5 and 12 primes for \(r=1,\dots,4\) in 2D, 3D, 4D and 5D alike (51,121
-  neighbour classes at \(r=4\) in 5D). Capacity depends on how many neighbours a rule reads,
-  not on the dimension they come from.
-* Long fits are easy to find in large classes; they just aren't generators. An unrestricted 2D
-  table was tuned to 72 primes (2 … 359) from a pair within two minutes. In 3D the search reached
-  27 primes in ten minutes, because each step has more patterns to fit.
-
-**Verdict.**
-
-* No class that can be searched exhaustively contains a simple rule, from any starting pattern,
-  on the square, hexagonal or cubic lattice, or in any higher dimension tried (symmetric families
-  up to 21 dimensions, two of them proved for every dimension; tables up to 10).
-* The simplest rules that look like prime generators reproduce a wheel and break at 25 at the
-  latest.
-* A rule that generates every prime, if one exists, is not simple: it has to keep finding new
-  primes, which means computing them.
-* Not yet covered: rules with more than two states, and the minimal rule size beyond about 45
-  table entries. The huge symmetric classes (3×3×3 and 5×5 isotropic) were searched only
-  partially; their 30-prime fits consult hundreds of entries.
+You can also watch it in a terminal:
 
 ```
-cargo run --release -- search  --class totalistic --any-start --terms 30          # every Life-like rule, every start
-cargo run --release -- sweep   --min-dim 2 --max-dim 21 --terms 14               # symmetric families, every dimension
-cargo run --release -- search  --neighbourhood hex --class isotropic --any-start --terms 30
-cargo run --release -- profile --any-start --terms 12 --time-limit 120 --entry-cap 70
-cargo run --release -- scan    --any-start --max-arity 4 --terms 40
-cargo run --release -- search  --seed "-1,0;1,0" --target 2,3,5,7,11,13,17,19,23,25,29 --max-entries 26 --show 1
+cargo run --release -- demo
 ```
 
-## A cellular automaton whose count is the next prime
-
-Searching did not find a simple rule, so `src/prime_display.rs` builds one. Start from one set
-cell. After each application of the rule the number of set cells is the next prime:
-
-```
-step   0  1  2  3  4  5   6   7   8   9  10 ...
-count  1  2  3  5  7  11  13  17  19  23  29 ...
-```
-
-**What kind of automaton.** It is two-dimensional, uses the Moore neighbourhood (radius 1) and
-one rule for every cell. A cell is either empty or a tile. A tile has a visible "set" flag plus
-hidden integers (64-bit words), so the state set is finite but very large. The count is the
-number of set cells; the cells that do the computing stay unset until their turn.
-
-**How it works.**
-
-* Every integer \(n\) gets its own cell in a growing triangle. Row \(y\) holds the \(y\)
-  consecutive numbers starting at \(y(y-1)/2+1\). Each row creates the next one, a little
-  slower than light speed, so the triangle stays ahead of the numbers that are needed.
-* Cell \(n\) turns set at step \(\tau(n)=\pi(n-1)+1\) and stays set. After step \(t\) the set
-  cells are then exactly \(1,\dots,p_t\), so the count is \(p_t\).
-* To learn \(\tau(n)\), each cell:
-  1. tests its own primality by trial division, one divisor per step;
-  2. counts the primes from itself to the end of its row (a right-to-left pass);
-  3. receives the prime count below its row (passed up the left edge, then copied along the row);
-  4. carries the global time and turns set when the time reaches \(\tau(n)\).
-* This takes about \(\sqrt n + 3y\) steps, while \(\tau(n)\) grows like \(n/\ln n\). The numbers
-  up to 1275 (rows 1–50) are too early for that, so the rule contains a table of their flip
-  times. With 40 rows the machinery has no slack left, and with 30 it is late.
-
-**How it was checked.**
-
-* Two simulators run the same rule: a direct one, and an event-driven one that only evaluates
-  cells that can change. They agree cell by cell (tested for 900 steps).
-* The count equals \(p_t\) at every step for 3,000 steps (direct) and 20,000 steps
-  (event-driven, up to \(p=224{,}737\)).
-* A timing certificate bounds when each cell learns \(\tau\) and compares that with its deadline,
-  using exact \(\pi\) up to \(10^7\) and Dusart's bound \(\pi(x)\ge x/(\ln x-1)\) above. It covers
-  every row whose numbers fit in 64 bits (rows 51 to 6,074,000,998). The tightest row is 52, with
-  26 steps to spare (31 in simulation).
-* So this rule is exact for every step before 114,179,426,570,746,131, when its 64-bit words
-  overflow.
+It shows the first 16 rows up close, with their numbers, then zooms out to 64 rows to show the
+cells at work. `--speed 2` plays it twice as fast and `--plain` prints the frames as text. Here
+are two steps of the plain output (lit cells are in brackets):
 
 ```
-cargo run --release -- primeca --steps 20000            # event-driven, prints the count at each report
-cargo run --release -- primeca --steps 3000 --direct    # direct simulation
-cargo run --release -- primeca --certificate           # timing certificate for every 64-bit row
+    11   12   13   14   15
+  [  7]   8    9   10
+  [  4][  5][  6]
+  [  2][  3]
+  [  1]
+
+  step 4: 7 cells are lit, and 7 is the 4th prime
 ```
 
-### A finite alphabet, exact at every step (3D)
-
-`src/prime_columns.rs` removes the 64-bit limit. Every cell holds a bounded amount of data: a few
-64-bit digits and flags. The automaton is exact at every step, forever.
-
-**What kind of automaton.** It is three-dimensional, uses the Moore neighbourhood (radius 1) and
-one rule. The seed is again one set cell.
-
-* The plane \(z=0\) runs the 2D automaton above, unchanged, for every row below \(2^{31}\), i.e.
-  for every step before about \(1.5\times10^{16}\). On that range it is the 2D automaton, cell for
-  cell.
-* From row \(2^{31}\) on, every number is a column of 64-bit digits standing on its cell of the
-  triangle. The column has as many digits as \(4y^2\) needs (2 until row \(2^{63}\), then 3, …).
-  Only the top cell of a column can be set.
-
-**How a column works.** It does what a 2D tile does, one digit per cell:
-
-* New rows are built digit by digit, with carries moving up. A column grows one digit when the
-  row number needs it.
-* A head walks up and down the column doing trial division, with each remainder computed by
-  binary long division.
-* The suffix pass, the chain and the broadcast work as in 2D, with carries moving up.
-* The clock is replaced by counters that every column decrements at every step:
-  \(Q=\pi(\text{row end})-t\), passed along the chain and the broadcast, and the countdown
-  \(\tau-t=Q+1-\text{suffix}\). The cell turns set when the countdown reads 0.
-* Borrows climb one digit per step, so digit \(k\) of a counter lags \(k\) steps behind. A flag
-  climbing with the borrows ("every digit below me is 0") is exact, so the top cell sees exactly
-  when the whole countdown reads 0, but \(h-1\) steps late. To make up for that, every digit sends
-  one extra decrement down when the countdown starts. Nothing depends on the column height, so
-  there is no limit to how tall columns may grow.
-
-**How it was checked.**
-
-* The plane \(z=0\) equals the 2D automaton, cell for cell (400 steps).
-* The division head classifies every \(n\le1500\) correctly with 3-, 4-, 5-, 8- and 64-bit digits.
-* With 64-bit digits, rows are built correctly where columns gain digits: from the last narrow row
-  (\(2^{31}-1\)) to the first column row, and from row \(2^{63}-1\) to row \(2^{63}\) (three
-  digits). With the real clock, 64-bit countdowns fed by the last narrow row flip exactly on time.
-* From the seed, with small digits so that columns appear after a few rows, the count is exact at
-  every step: 3, 4, 5, 6, 8, 14 and 16-bit digits, up to row 160 (\(p\) up to 12,853). With 14- and
-  16-bit digits, rows 51–63 (51–127) use the 2D machinery before the columns take over. Small digits
-  make the machinery too slow for the tiny early deadlines, so these runs give it a head start of
-  \(K\) steps (the count is then \(p_{t-K}\)). Columns are sized so that the extra \(K\) fits.
-* With the real clock and no head start: two rows whose primality is already decided run the suffix
-  pass, the chain (from a narrow tile and from columns), the broadcast and countdowns several digits
-  wide. Every column flips exactly on time, including columns one digit taller than the row below.
-* A sparse simulator that evaluates every cell next to a non-empty one agrees with the dense one,
-  so the rule creates nothing outside the triangle.
-* Planted bugs in the countdown (no extra decrements, no zero flag, an off-by-one) are all caught.
-* The latency bounds used by the certificate hold for every simulated column.
-* **Timing certificate for the real automaton** (`primecols --certificate`):
-  * rows 51 to \(2^{31}-1\) are covered by the 2D certificate;
-  * every later row is checked on a geometric grid up to row \(10^{150}\), with an analytic
-    estimate beyond (latency \(O(y\log^2 y)\) against deadlines of order \(y^2/\log y\));
-  * every column's countdown is exact before its deadline, with the bound at most 0.27 of the
-    deadline (worst at row \(2^{31}\)).
-
 ```
-cargo run --release -- primecols --certificate                # every row of the real automaton
-cargo run --release -- primecols --w 4 --k 6000 --rows 40    # 4-bit digits, columns from row 2
-cargo run --release -- primecols --w 14 --k 10000 --rows 90  # 2D machinery, then columns from row 64
+    16   17   18   19   20   21
+  [ 11]  12   13   14   15
+  [  7][  8][  9][ 10]
+  [  4][  5][  6]
+  [  2][  3]
+  [  1]
+
+  step 5: 11 cells are lit, and 11 is the 5th prime
 ```
 
-**Dimensions.**
+To check many more steps than the animation shows, `cargo run --release -- primeca --steps 20000`
+runs the automaton for 20,000 steps (up to the prime 224,737) and checks the count after each one.
 
-* One dimension is impossible for any rule: a 1D pattern grows by a bounded number of cells per
-  step, while \(p_t\) grows like \(t\ln t\).
-* Two dimensions work with 64-bit cells, for the first \(1.1\times10^{17}\) steps.
-* Three dimensions work forever with a finite alphabet.
-* Folding the columns into the plane (each row a band of \(h\) grid rows) should give the same in
-  2D, but that has not been built.
+## How the automaton works
 
-## Constructive route
+**One cell per number.** The cells form a staircase: row 1 holds the number 1, row 2 holds 2 and
+3, row 3 holds 4, 5 and 6, and so on. Each row is one cell longer than the row below and carries
+on counting where that row stopped. New rows are added at the top as the automaton runs, a little
+ahead of when they are needed.
 
-`src/construct.rs` implements the part of the population construction that is independent of
-primality.  A finite-state logical CA is encoded in disjoint binary blocks.  Each ordinary active
-state has the same four ON cells: a self-synchronising `101 / 010` frame and one payload bit.
-Changing logical states therefore does not change the binary population.  `BlockMachine` also has
-a per-output-cell local path; its sparse binary transition is checked against the direct logical
-block transition.
+**Each cell lights up at the right moment, and stays lit.** The cell for the number n lights up at
+step "1 + the number of primes smaller than n". Take cells 8, 9, 10 and 11: each has four smaller
+primes (2, 3, 5 and 7), so all four light up at step 5. After step 5 the lit cells are exactly 1 to
+11, which makes 11 cells, and 11 is the 5th prime. The same happens at every step: after step n,
+the lit cells are 1 up to the n-th prime.
 
-For an ordinary block weight \(W\), write
+**So every cell has to find out how many primes are smaller than its number, before its moment
+comes.** A cell can only talk to its eight neighbours, so this happens in stages:
 
-\[
-p_t = Wm_t + h_t,\qquad
-W \le h_t < 2W
-\]
+1. **Am I prime?** The cell tries dividing its number by 2, 3, 4, … one divisor per step, until
+   one divides it or the divisor passes the square root.
+2. **Count along the row.** Starting from the right-hand end of each row, every cell tells its left
+   neighbour how many primes there are from there to the end of the row.
+3. **Running total up the left edge.** The first cell of each row hears from the row below how many
+   primes there are in all the rows below. It adds its own row's primes and passes the total up.
+4. **Back along the row.** The total is passed to the right, cell by cell. Each cell subtracts the
+   primes from itself to the end of its row, which leaves the number of primes smaller than itself.
+5. **Wait.** Every cell carries a clock, and lights up when the clock reaches its moment.
 
-after a finite bootstrap (when \(p_t<W\), the tail is the bootstrap itself).  The next population
-is produced with \(k_t=m_{t+1}-m_t\) split blocks and a bounded tail transition:
+**Why it is never late.** This work takes about √n steps (testing divisors) plus a few times the
+row length (passing counts along). The moment of cell n comes after about n / ln n steps, which
+grows much faster. So high enough up, every cell is ready long before its moment: in the
+animation, the blue always stays ahead of the gold. Near the bottom there isn't enough time, so the
+rule contains a small table with the moments of the first 50 rows (the numbers 1 to 1,275). With a
+40-row table the cells would be only just on time, and with 30 rows they would be late.
 
-\[
-p_{t+1}-p_t = Wk_t + (h_{t+1}-h_t).
-\]
+**What a cell holds.** Besides its visible on/off switch, a cell carries a few hidden whole
+numbers: its own number, its row, the clock, the divisor it is trying and its counts. Only the
+switch is counted. In cellular-automaton terms, each cell has a very large but finite number of
+possible states, where the Game of Life has two (on and off).
 
-`construct --steps N` checks this equation for \(N\) independently generated prime gaps.  The
-`PreparedPrimeOutputRule` is local: ordinary blocks can carry a prepared `split` and `tail
-residue` request label; each labelled parent survives and births exactly one ordinary child
-immediately to its east, while the adjacent framed tail changes to the requested residue.  The
-framed and per-cell binary compiler is tested on this complete output transition.
+**Lasting forever: the 3D version.** The 2D version stores each hidden number as a 64-bit integer,
+which eventually overflows: it is exact for every step before step 114,179,426,570,746,131 (about
+10¹⁷). A true cellular automaton must have a fixed, finite set of possible states, so its cells
+can't hold numbers that grow without limit. The 3D version fixes this. Once numbers get too big for
+one cell, each number becomes a stack of digits rising into the third dimension, one 64-bit digit
+per cell. The stack grows taller as the numbers grow, so there is no limit. Every stage above is
+then done digit by digit, like adding and dividing by hand, with carries passed up the stack. Until
+stacks are needed (around step 1.5 × 10¹⁶), the 3D version is exactly the 2D version.
 
-The work is deliberately split at a hard boundary: **the code does not contain a prime scheduler
-yet**.  A finite-state local scheduler must remain sufficiently far ahead that, at generation
-\(t\), it has prepared \(k_t\) split labels and the next tail state.  It must do so for unbounded
-prime gaps, with a bounded-state pipelined sieve/ordered result compactor and no host-side oracle.
-`construct` therefore reports a population accounting certificate, not a population-generating
-CA.  A finite run matching the primes is not being presented as proof of the infinite sequence.
+## Why no simple rule works
 
-### Autonomous scheduler primitives
+Before building anything, we searched. The project's original search wrote rules as logical
+formulas and tried them one by one; it was so slow that it was only practical in one dimension. The
+new search engine is many orders of magnitude faster because it:
 
-`src/prime_worker.rs` now contains an actual finite-state rule for the arithmetic core.  A tape
-cell stores four binary registers (`n`, divisor, divisor square, remainder), boundary/cursor bits,
-and one of a finite set of control phases.  The head performs compare/subtract/add rewrites using
-only west/east neighbours.  Every tape cell remains active while the head moves, so logical state
-changes preserve its block count.
+- only fills in the parts of a rule that the simulation actually uses, so one failed run rules out
+  a whole family of rules at once;
+- drops a rule as soon as a step gives the wrong count;
+- treats rules that are rotations or mirror images of each other as one;
+- covers every possible starting pattern by checking just a handful of two-cell patterns, with a
+  proof that nothing else needs checking.
 
-`PrimeWorker` classifies one candidate serially over divisors.  `DivisorWorker` fixes a divisor;
-`ParallelCandidate` lays out one such worker per divisor \(2\ldots\sqrt n\), and a vertical
-finite-state reducer produces `CandidatePrime` or `CandidateComposite`.  `ParallelCandidateField`
-tests several tiles under one synchronous application of the same local rule.  No host primality
-test is consulted after the binary tile is constructed.
+What it found:
 
-The one-dimensional stack of divisor rows is now retained only as a simple reference.  The
-constructed layout is `MeshCandidate`: its \(\Theta(\sqrt n)\) workers are packed in an
-\(n^{1/4}\times n^{1/4}\) rectangle.  An active row wire waits at each divisor result and an
-active column wire performs the second AND reduction.  The tile has
-\(O(\sqrt n\log n)\) cells and \(O(n^{1/4}\log n+\log^2 n)\) causal latency.  Launching
-\(\Theta(\log n)\) candidates per physical step therefore keeps
+- **Simple, symmetric rules fail fast.** From any starting pattern, Life-like rules on a square
+  grid get only as far as 2, 3, 5. The best simple family is on a hexagonal grid, and it gets 2, 3,
+  5, 7, 11, 13, 17 and then 21.
+- **More dimensions make it worse.** In more dimensions a symmetric rule ties more cells together,
+  so the count jumps by too much at once. For two large families this is proven for every
+  dimension; for example, no Life-like rule in 3 or more dimensions can even produce 2, 3, 5.
+  Symmetric families were checked up to 21 dimensions, and other families up to 10.
+- **The cheapest near-misses are fooled by 25.** The simplest rules that get furthest actually
+  produce the numbers that aren't divisible by 2 or 3: 5, 7, 11, 13, 17, 19, 23, and then
+  25 = 5 × 5.
+- **Longer matches are memorisation.** With big enough rule tables, a search matched 72 primes in a
+  row. But each extra prime cost about three more table entries: the rule was storing the list,
+  not producing it. For simple sequences such as 1, 2, 3, 4, … or the square numbers, the number of
+  entries needed stops growing straight away. For the primes it never did.
 
-\[
-O(\sqrt n\log n)\,O(n^{1/4}\log n)\,O(\log n)
-  =O(n^{3/4}\log^3 n)=o(n)
-\]
+The lesson: a rule that keeps producing primes has to compute them, and a rule that computes is not
+simple. So we built one.
 
-ordinary scheduler blocks in flight after a finite threshold.  This repairs the resource bound
-that a stack of divisor rows could not satisfy.
+**What was known before.** Cellular automata can already signal the primes in time. A known
+one-dimensional automaton (Fischer, 1965; Korec, 1997) switches one particular cell on exactly at
+the prime-numbered steps, and the Game of Life has a pattern that does something similar
+(Hickerson's "Primer", 1991). We know of no earlier work on the version asked here, where the
+number of lit cells must be the primes.
 
-The source half of the pipeline is also finite-state: `BinaryCounter` increments a distributed
-binary word and births a new high bit on overflow; a stride-counter bank emits contiguous batches.
-The `pipeline` command is deliberately named a diagnostic: Rust still performs tile placement and
-ordered release while the workers and counters use local CA transitions.  It verifies that the
-CA-derived classifications are correct and ordered, but this is not yet a one-seed rule.
+## Does the number of dimensions mean anything?
 
-`src/scheduler.rs` adds two more local CA components.  `OrderedFifoRule` gives every candidate
-slot a pending/prime/composite state and moves a head only into the immediately following ready
-slot; `IntegratedSchedulerRule` combines that FIFO alphabet with `PrimeWorkerRule`, so a mesh
-result directly south of the head becomes the slot's result.  `GapCounterRule` is a pipelined
-binary incrementer: one release pulse toggles the LSB, carry bits travel east one cell per step,
-and a later prime pulse performs the final `+1`.  The `scheduler` command verifies one mesh
-classification, FIFO release and pulse count under one synchronous tagged CA rule.
+It is tempting to read something deep into the dimension, for instance about how many dimensions
+the universe has. What this project shows is more modest:
 
-`TravelingCounterRule` removes the fixed register/reset assumption.  A complete active rectangle
-contains one information column and padding elsewhere; every release shifts the information
-column one step east and converts the vacated source column to padding.  The number of active
-logical cells therefore stays constant.  Carries enter diagonally from the southwest, so 500
-incoming pulses can be accepted on consecutive steps and settle to the exact binary value.
-`BinarySubtractRule` is the complementary local primitive for subtracting a previous packed
-prime snapshot from a current snapshot; an east-moving borrow head produces the prime gap.
+- **1D is ruled out for a simple reason.** A line of cells can only grow by a fixed number of cells
+  per step, but the primes eventually outgrow that (the n-th prime is roughly n × ln n).
+- **2D is enough.** A flat sheet has plenty of room, and the rule above works there.
+- **3D was used for convenience**, to give each big number room to stack its digits. It could most
+  likely be flattened back into 2D.
 
-`src/bootstrap.rs` closes the finite low-population transient independently of the scheduler.
-`BinaryBootstrapRule::compile` records a finite set of full radius-\(R\) binary patterns for the
-transition \(1\to2\to3\to5\to\cdots\to p_T\), including false outputs.  Its `step` method is one
-homogeneous rule: it uses an exceptional local pattern when present and otherwise calls the
-framed block compiler.  Tests show the exact prime-prefix bootstrap and a handoff into a
-weight-seven framed tail state.  A later scheduler must still satisfy the tail/allocator
-invariants at that handoff point; the bootstrap does not manufacture scheduler correctness.
+So the dimension tells you how much room a computation needs, not something about prime numbers or
+about physics.
 
-The recurrent path no longer needs host reinitialisation. `RollingPrimeSchedulerRule` moves a
-serial worker's result back to a fixed LSB port, waits for an acknowledgement, increments the
-distributed candidate (including a new guard bit at powers of two), resets divisor, square and
-remainder fields locally, and starts the next classification. The same product rule feeds release
-pulses into a binary counter; a prime pulse snapshots the completed gap into a second row and
-resets the counter as the snapshot wave passes.
+## How we know it works
 
-`RollingStrideSchedulerRule` stores a lane stride on a parallel finite-state tape. A family of
-lanes therefore classifies
+- **Two separate simulators** run the 2D rule. One updates every cell at every step; the other
+  updates only the cells that can change. They agree cell by cell, and the count equals the n-th
+  prime after every one of the first 20,000 steps, up to the prime 224,737.
+- **A timing certificate** shows that every cell is ready before its moment, for every row the
+  64-bit version can hold. It uses a proven lower bound on how many primes there are (Dusart,
+  2010). The closest call is row 52, with 26 steps to spare (31 in the actual simulation).
+- **The 3D version** was checked in four ways:
+  - It was run with tiny digits (3 to 16 bits) so that stacks appear after a few rows, and counted
+    correctly at every step up to the prime 12,853. Tiny digits make the work slow, so these runs
+    start the clock late.
+  - Its arithmetic was tested with full-size 64-bit digits, including where stacks grow a new
+    digit.
+  - Its countdowns were tested with the real clock.
+  - A timing certificate covers every row, forever: numerically up to row 10¹⁵⁰, and by an
+    estimate beyond. In the worst case the cells need at most 27% of the time they have.
+- **The tests can fail.** Bugs planted on purpose in the countdown logic are all caught. Run
+  `cargo test --release` for the whole suite.
 
-\[
-n+i,\quad n+i+L,\quad n+i+2L,\ldots
-\]
+## What this is not
 
-without changing the local alphabet or rebuilding a worker. `RollingBatchSchedulerRule` adds a
-backpressured merge column: a readiness wave waits for every lane, and a single release wave emits
-lane 0, lane 1, ... in candidate order. The `rolling` command exercises repeated batches under
-that one rule. Rust observes the released records for the diagnostic, but does not classify,
-advance, resize, reset or order them.
+- **It is not a simple rule.** It is closer to a small program running in every cell. The searches
+  strongly suggest that no simple rule exists, though that can't be proven for every rule.
+- **Cells hold hidden numbers.** Only the on/off switch is counted, but cells carry extra
+  information. A version where every cell is purely on or off, like the Game of Life, was started
+  (see "Constructive route" in the [technical notes](docs/technical-notes.md)) but isn't finished.
+- **The first 1,275 numbers come from a table.** The table is a fixed, finite part of the rule, but
+  it is a lookup, not a computation.
+- **The 3D version hasn't been run at full scale.** Its stacks only start after about 10¹⁶ steps.
+  Its correctness there rests on testing each mechanism with full-size 64-bit digits and on the
+  timing certificate.
 
-The large worker alphabet also compiles through the framed binary codec. Decoding was changed
-from an alphabet-wide scan to direct codeword recognition, and the arbitrary 100,000-state guard
-was replaced by checked coordinate/radius arithmetic. A scheduler configuration with more than
-half a million logical states now round-trips through the constant-weight binary encoding.
+## Run it yourself
 
-### Scheduler design and remaining obstruction
+You need Rust (`cargo`).
 
-A viable schedule uses dyadic candidate epochs. During the output interval whose prime values lie
-in \([N,2N]\), admit one batch per generation, with
+| command | what it does |
+|---|---|
+| `cargo run --release -- demo` | watch the automaton in the terminal |
+| `cargo run --release -- demo --svg docs/demo.svg` | redraw the animation at the top of this page |
+| `cargo run --release -- primeca --steps 20000` | run the 2D automaton and check the count after every step |
+| `cargo run --release -- primeca --certificate` | timing certificate for the 2D version |
+| `cargo run --release -- primecols --certificate` | timing certificate for the 3D version |
+| `cargo run --release -- primecols --w 4 --k 6000 --rows 40` | run the 3D version with 4-bit digits, so stacks appear from row 2 |
+| `cargo run --release -- search --class totalistic --any-start --terms 30` | try every Life-like rule from every starting pattern |
+| `cargo run --release -- sweep --min-dim 2 --max-dim 21 --terms 14` | symmetric rule families in 2 to 21 dimensions |
+| `cargo run --release -- help` | every command and option |
+| `cargo test --release` | the test suite |
 
-\[
-L=\lceil 4\ln N\rceil
-\]
+## What's in the repository
 
-consecutive candidates per batch. A ring has enough phase-staggered recurrent families that a
-family is revisited only after the conservative serial-worker bound
+| file | what it holds |
+|---|---|
+| `src/prime_display.rs` | the 2D automaton, its two simulators and its timing certificate |
+| `src/prime_columns.rs` | the 3D version, with numbers as stacks of digits |
+| `src/demo.rs` | the terminal demo and the animation |
+| `src/table_search.rs`, `src/rule_class.rs`, `src/dimension_sweep.rs`, `src/lattice.rs` | the searches for a simple rule |
+| `src/bounds.rs` | the impossibility proofs (one dimension, symmetric rules) |
+| `src/construct.rs`, `src/prime_worker.rs`, `src/scheduler.rs` and others | the unfinished on/off-only construction |
+| `src/state_explorer.rs`, `src/space.rs`, `src/rule.rs` | the original formula-based search (`legacy`) |
+| `docs/technical-notes.md` | the detailed record: every search result, proof sketch and design decision |
 
-\[
-100(2\sqrt N+1)(w^2+w+1), \qquad w=\lceil\log_2(4N)\rceil+2.
-\]
+## Where this started
 
-The next use of the family advances every lane by the whole ring stride, so the batches still
-partition the candidate interval.
+Prime numbers are intriguing: every other number is built from them. This project began as a
+search over rules written as formulas, dimension by dimension, hoping to find a pattern whose cell
+count is the primes. That first search found rules for sequences such as 1, 2, 3, 4, …, the odd
+numbers and the squares, and once 1, 3, 5, 9, 11, 15, 19, 27, but never the primes. The rest of
+the story is above.
 
-`PrimeEpochPlan` checks this schedule against explicit prime-counting bounds from
-[Dusart (2010)](https://arxiv.org/abs/1002.0442):
+![An early run of the original search](./example.gif)
 
-\[
-\pi(x)\ge {x\over\ln x}\left(1+{1\over\ln x}\right),\qquad
-\pi(x)\le {x\over\ln x}\left(1+{1.2762\over\ln x}\right).
-\]
-
-It includes a factor-four allowance for builders, merge and recycling. A fixed two-phase gate
-admits one batch every other output generation. With \(\lceil5\ln N\rceil\) lanes this overcovers
-\([2N,4N)\) while keeping every worker below a \(5N\) latency bound. Four fixed-width packed
-windows cover two
-rolling mask-lead buffers plus equal active compaction padding. The first conservative dyadic epoch
-passing every implemented check is \(N=2^{88}\):
-
-- 305 candidates per admitted batch;
-- ungated capacity \(2.471777\) times the next dyadic interval;
-- admitted coverage \(1.235889\), using exactly one half of the epoch generations;
-- scheduler live population \(0.446822N\);
-- disjoint next-ring construction cost below \(0.784N\);
-- simultaneous current/next ordinary-output reserve above \(0.384\) of the \(2N\) end population;
-- explicit maximum prime gap below \(0.00002103N\);
-- worst-case local gap-to-mask decoding below \(0.188\) of one epoch;
-- next-ring construction rate below 12.1 ordinary blocks per generation, under 4% of the 305
-  lane/build heads.
-
-The gap and mask bounds use Dusart's theorem that
-\([x,x+x/(25\ln^2x)]\) contains a prime for \(x\ge396738\). Thus the asymptotic schedule has both
-enough candidate throughput and enough ordinary-block reserve for every required split. The huge
-threshold is acceptable for an existence construction because everything below it can be a
-finite bootstrap; it is not intended as a practical simulation threshold. Run
-`epoch --power 88` to print the numerical resource check.
-
-The builder count is not claimed to stay fixed. With fixed-width rolling buffers it grows as
-\(O(\log N)\), while the epoch supplies \(\Theta(\log N)\) lane/build heads; the resource check tracks
-their ratio. The next ring is budgeted disjointly rather than assuming an unproved in-place
-transformation.
-
-`src/mask_writer.rs` implements that local decoder rather than treating it as a timing oracle. A
-sparse \(O(\log g)\)-cell counter loads a binary split count, decrements it, shifts one cell and
-arms exactly one reservoir parent per decrement without changing active population.
-[Balzer's 8-state firing-squad rule](https://djm.cc/fsquad/firing-solution-balzer.html) then
-synchronizes the selected prefix. A permanent non-splitting sentinel
-applies the tail residue in the same generation, including the zero-split case. Direct block-code
-tests verify a one-generation binary change of exactly \(4k+\Delta r\).
-
-`src/packed_queue.rs` supplies the preceding buffer stage. A logical cell packs up to 20 record
-bits while retaining the same four-live-cell binary frame. Entire fixed-height record columns move
-through active padding, so every row compacts stably without changing population. After compaction,
-a shift phase exposes one complete multi-chunk record at the row edge per generation. Rows cover
-consecutive candidate ranges and are consumed in row order; their square-grid compaction and row
-switch overhead is included in `PrimeEpochPlan`.
-
-The queue and decoder use the same chunk vector directly: no host integer reconstruction is needed
-between them. `src/conveyor.rs` provides population-neutral cyclic transport for the epoch layout;
-payload order is preserved around a finite local rectangle, and parallel copies carry every chunk
-of a record column.
-
-`TaggedPairRule` in `src/construct.rs` supplies the generic disjoint-alphabet union used to place
-independent finite-state modules under one homogeneous logical rule before adding the explicit
-bridge states above.
-
-`src/record_writer.rs` supplies the family-side format conversion. A prime result freezes its
-distributed candidate tape, copies the bits into an active record row, and packs fixed groups of
-bits into queue chunks with local moving heads; a composite leaves a padding hole. The recurrent
-product rule performs classification, copy/backpressure, record reset, guard-bit growth and worker
-recycle without a host transition between candidates. A second product attaches that lane to a
-sparse-gated alternating ring: the completed record rearms its station, the head acknowledges it,
-and only then may the record reset and the worker advance. A local firing-squad copy stage detaches
-the record into an already-active padding conveyor; prime words and composite-empty markers move
-away in candidate order while a fresh slot remains at the station. With the epoch's fixed worker
-width this complete cycle is population-neutral. A stationary finite accumulator samples those
-moving words most-significant bit first and emits the same fixed-width chunk states used by the
-packed queue, preserving composite holes. `src/packed_subtract.rs` subtracts two such packed
-records chunk by chunk: a result row between them starts at the least significant chunk and a
-borrow wave moves one chunk per step towards the most significant end. `src/gap_plan.rs`
-then implements the exact weight-four arithmetic after consecutive prime records are subtracted:
-adding the current two-bit tail residue makes the low two sum bits the next residue and all higher
-bits the split count. The synchronized typed-output variant can assign every split child a concrete
-worker, wire, queue, or reservoir role while retaining the same \(4k+\Delta r\) population change.
-
-The older launch estimate is still useful for the compact one-shot mesh alternative:
-
-\[
-L(n)=\left\lfloor\frac{n}{8(1+\log_2 n)}\right\rfloor.
-\]
-
-The worker keeps \(n\) and a divisor in \(O(\log n)\) finite-state tape cells and has an
-\(O(\sqrt n\,(\log n)^2)\) local-step bound.  Since \(L(n)\) is \(o(\pi(n))\) and the same is true
-of the worker bound, for all sufficiently large \(n\) the result exists strictly before output
-index \(\pi(n)\).  Thus a candidate does not have to finish in one CA generation: a pipelined
-ordered buffer can retain every completed result until its integer position is reached.  The
-launch rate is \(O(\log n)\), the concurrent trial-division footprint is
-\(O(\sqrt n\,(\log n)^4)=o(n)\), and candidate results can be packed into finite large-state
-blocks.  The parallel prefix/compaction and binary-to-split-mask networks only need logarithmic
-pipeline depth.  After a finite threshold, their fixed constants can therefore be made smaller
-than the ordinary-block budget \(p_t/4\); all earlier configurations are a finite bootstrap.
-
-This gives the exact finite-state network obligations, but it is not yet the implemented CA:
-launching workers, ordered compaction and spatial reservation still need concrete local transition
-tables, a proof that the result buffer is nonempty at every output step, and a finite bootstrap
-checked through the hand-off.  No claim that the population-generating rule exists is complete
-until those tables and the induction are present.
-
-The remaining local construction is narrower than before but still essential:
-
-- build and recycle the dyadic ring geometry from ordinary reservoir blocks;
-- compose packed station chunks, record-pair subtraction, compacted rows and output decoders under
-  the tagged epoch rule;
-- generate the next epoch's regular role/instruction geometry with the checked \(O(\log N)\)
-  builder share;
-- prove arena ownership and reserved child vacancies at every output transition;
-- compile the finite bootstrap to the complete legal epoch configuration.
-
-## Current status
-
-The original expression search still only gets as far as the 2nd dimension if you run it long
-enough.  The rule-table search answers the prefix question exactly for much larger classes than
-that: in every class tried, short prefixes of the primes can be matched but no compact rule was
-found, and the minimum description length of the prime prefixes keeps growing. This now holds
-from every starting pattern as well (pair reduction): every symmetric class dies within
-seven primes when it is small enough to exhaust. Symmetric classes with millions of entries fit 30
-primes only by consulting hundreds of entries. The cheapest long fits are wheels for 2 and 3 that
-break at 25.
-
-A rule that does generate the primes exists once it is allowed to compute (see "A cellular
-automaton whose count is the next prime"):
-
-* The 2D automaton turns one set cell into \(p_t\) set cells after every step \(t\). It was
-  simulated for 20,000 steps and is certified up to its 64-bit limit (\(1.1\times10^{17}\) steps).
-* The 3D automaton with a finite alphabet does the same at every step, forever. It is simulated
-  with small digits and certified for every row with 64-bit digits.
-* In one dimension no rule can do it: a 1D pattern grows by a bounded number of cells per step,
-  while \(p_t\) grows like \(t\ln t\).
-
-The epoch construction described under "Constructive route" is an earlier, unfinished attempt at
-a two-state version; it remains open until the local epoch factory, gap-to-mask transport, arena
-invariant and all-\(t\) handoff induction are complete.
+Contributions are welcome. If you can make the search faster, or find a simpler rule, open a pull
+request.

@@ -17,6 +17,7 @@ mod rule_class;
 mod dimension_sweep;
 mod prime_display;
 mod prime_columns;
+mod demo;
 mod construct;
 mod bootstrap;
 mod conveyor;
