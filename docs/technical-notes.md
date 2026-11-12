@@ -330,9 +330,9 @@ So more dimensions make symmetric rules worse: they tie more cells together.
   latest.
 * A rule that generates every prime, if one exists, is not simple: it has to keep finding new
   primes, which means computing them.
-* Not yet covered: rules with more than two states, and the minimal rule size beyond about 45
-  table entries. The huge symmetric classes (3×3×3 and 5×5 isotropic) were searched only
-  partially; their 30-prime fits consult hundreds of entries.
+* Not yet covered: the minimal rule size beyond about 45 table entries. The huge symmetric classes
+  (3×3×3 and 5×5 isotropic) were searched only partially; their 30-prime fits consult hundreds of
+  entries. Rules with more than two states are covered in the next section.
 
 ```
 cargo run --release -- search  --class totalistic --any-start --terms 30          # every Life-like rule, every start
@@ -341,6 +341,159 @@ cargo run --release -- search  --neighbourhood hex --class isotropic --any-start
 cargo run --release -- profile --any-start --terms 12 --time-limit 120 --entry-cap 70
 cargo run --release -- scan    --any-start --max-arity 4 --terms 40
 cargo run --release -- search  --seed "-1,0;1,0" --target 2,3,5,7,11,13,17,19,23,25,29 --max-entries 26 --show 1
+```
+
+### More states per cell
+
+Every search above assumes a cell is set or not. `multistate` (`src/multi_state.rs`) searches rules
+whose cells have \(k\) states, 0 (empty) to \(k-1\); the next state depends on the cell's own state
+and its neighbours' states, and an empty cell with empty neighbours stays empty. Two ways of
+counting:
+
+* `--lit any`: every non-empty cell counts (the states are colours of a lit cell);
+* `--lit one`: only state 1 counts; the other states are hidden helpers that do not count, like
+  the machinery of the constructed automaton below.
+
+Classes: **totalistic** (own state and how many neighbours are in each state: multi-state Life-like
+rules), **isotropic** (own state and the neighbourhood pattern up to the rotations and reflections
+of the grid) and full **tables**. Grids: square (8 or 4 neighbours), hexagonal, cubic (26 or 6
+neighbours) and, for testing, the line.
+
+The search is the lazy prefix search of the binary engines, plus:
+
+* states with the same role are interchangeable (relabelling them changes no count), so a state is
+  only used for the first time if every lower one already is;
+* an entry is only decided if the remaining open entries can still produce exactly the target count
+  (subset sums of the cell groups, as a bitset) and, with hidden helpers, if the cap on non-empty
+  cells (`--max-cells`) still leaves room for the lit cells the step needs. Without these checks
+  the search spent minutes on combinations that could never fit: symmetric classes have cell groups
+  of sizes such as 4 and 8, and hidden helpers can fill any number of cells;
+* every node records how many table entries its trajectory has consulted, so a complete search gives
+  the smallest rule for each prefix. `--profile` finds it exactly by searching with a growing entry
+  bound: each smaller bound is ruled out by a complete search.
+
+Two results need no search (proofs in the module header):
+
+* **Symmetric rules and one cell, any number of states, any dimension.** A totalistic or isotropic
+  rule commutes with the rotations and reflections that fix the seed, so everything grown from one
+  cell is symmetric about it. The cells in each state form a union of orbits: the seed cell, and
+  orbits of at least 4 cells (6 on the hexagonal grid and the cube). So the count is never 2 or 3,
+  with or without hidden helpers.
+* **Every starting pattern reduces to close pairs** (counting every non-empty cell, symmetric rules).
+  A run 2, 3 starts from two cells \(a,b\). If no cell reads both, the next count is \(c_a+c_b\),
+  where \(c_s\) is the count one step after a lone cell in state \(s\), which is 0 or 1 plus orbit
+  sizes of at least 4. So \(c_a+c_b\neq 3\), and the close pairs in states (1, 1) and (1, 2), up to
+  symmetry, settle every starting pattern. With hidden helpers, a configuration with two lit cells
+  can hold any number of hidden ones, so there the search starts from one or two lit cells only.
+
+How it was checked:
+
+* class sizes for two states equal the binary classes' (17, 101, 9, 11, 13, 25, 53, 19 and 511
+  entries);
+* with two states, the longest runs from every starting pattern equal the binary engines' in nine
+  classes (square, 4-neighbour, hexagonal and cubic grids, totalistic and isotropic);
+* all \(3^{17}\) = 129,140,163 rules of the 3-state totalistic class on the line, simulated directly,
+  give the same longest run and the same smallest rule for every prefix as the search, from one
+  cell and from every close pair, for both ways of counting, and with hidden helpers also under a
+  cap of 5 non-empty cells (which cuts some runs short);
+* the best rule found from every seed replays on a plain simulator that applies each symmetry to the
+  coordinates, and every entry its run needs is decided;
+* the subset-sum bitsets agree with brute force;
+* three planted bugs (no new states, lone cells ignored, wrong entry counts) are caught.
+
+**Results, 3 states.** Target: 30 primes (2 … 113) from every starting pattern; 20 million nodes per
+class unless the search finished. Each result is the longest run found, with the number of entries
+the best rule consults in brackets. **Bold**: the search finished, so no rule of the class does
+better. With hidden helpers, configurations are capped at 1,000 non-empty cells.
+
+| grid | class | entries | every non-empty cell counts | only state 1 counts |
+|---|---|---|---|---|
+| square, 8 neighbours | totalistic | 134 | 30 (99) | 30 (120) |
+| square, 8 neighbours | isotropic | 2,861 | 30 (140) | 30 (234) |
+| square, 4 neighbours | totalistic | 44 | **19 (43)** | 18 (42) |
+| square, 4 neighbours | isotropic | 62 | 22 (57) | 21 (62) |
+| hexagonal | totalistic | 83 | 27 (79) | 25 (77) |
+| hexagonal | isotropic | 275 | 30 (111) | 30 (179) |
+| cube, 26 neighbours | totalistic | 1,133 | 30 (215) | 20 (213)\* |
+| cube, 26 neighbours | isotropic | 158,942,078,603 | 30 (308) | 30 (341)\* |
+| cube, 6 neighbours | totalistic | 83 | **4 (7)** | 22 (81) |
+| cube, 6 neighbours | isotropic | 167 | 30 (114) | 30 (139) |
+
+\* Hidden helpers on the 26-neighbour cube: 2 million nodes and at most 300 non-empty cells.
+
+* One cell gets nowhere in any symmetric class (the theorem; the search confirms it on every grid,
+  for 2 to 4 states, both ways of counting).
+* The 4-neighbour totalistic class is small enough to finish: its best rule reproduces 19 primes
+  (2 … 67), from any starting pattern, and consults 43 of its 44 entries. The run ends because
+  the table is full.
+* Its 3D counterpart, the 6-neighbour totalistic class, also finishes, after 32 nodes: nothing
+  gets past 2, 3, 5, 7, although its table is almost twice as big (83 entries). Likely reason:
+  around a pair of cells on an axis, the cubic grid ties cells into symmetric groups of up to 16,
+  against 4 on the square grid, the effect that made higher dimensions worse for on/off rules.
+* In the other classes, the longest run found grows with the size of the table, and the best rules
+  use most of it.
+* Hidden helpers mostly do not help: the runs are as long or shorter and the rules larger (234
+  entries against 140 for 30 primes in the square isotropic class). The exception is the
+  6-neighbour totalistic cube, where a state that does not count can hold whole groups of cells
+  out of the count: 22 primes instead of 4, using 81 of the 83 entries.
+
+**Results, 4 states.** Same target; 3 million nodes per class and, with hidden helpers, at most 300
+non-empty cells. None of these searches finished.
+
+| grid | class | entries | every non-empty cell counts | only state 1 counts |
+|---|---|---|---|---|
+| square, 8 neighbours | totalistic | 659 | 30 (150) | 27 (139) |
+| square, 8 neighbours | isotropic | 34,959 | 30 (173) | 30 (353) |
+| square, 4 neighbours | totalistic | 139 | 30 (101) | 30 (117) |
+| square, 4 neighbours | isotropic | 219 | 30 (119) | 27 (124) |
+| hexagonal | totalistic | 335 | 30 (124) | 30 (145) |
+| hexagonal | isotropic | 1,719 | 30 (153) | 30 (146) |
+| cube, 26 neighbours | totalistic | 14,615 | 30 (276) | 14 (177) |
+| cube, 26 neighbours | isotropic | 375,313,061,509,119 | 30 (308) | 30 (341) |
+| cube, 6 neighbours | totalistic | 335 | 30 (112) | 26 (162) |
+| cube, 6 neighbours | isotropic | 879 | 30 (135) | 30 (222) |
+
+Every class now reaches 30 primes when every non-empty cell counts, and the rules found use 101 to
+308 entries for them (the search stops at the first rule that gets there, so these are not
+minimums). A fourth state buys a bigger table, not a shorter rule: the 4-neighbour totalistic class
+goes from 44 entries and at most 19 primes to 139 entries and 30 primes, using 101 of them.
+
+**Smallest rule for each prefix**, from every starting pattern; exact (every smaller rule is ruled
+out by a complete search).
+
+3-state totalistic, 4 neighbours (44 entries, small enough to search completely):
+
+| terms | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| counting numbers 2, 3, 4, … | 3 | 6 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 |
+| primes 2, 3, 5, … | 3 | 6 | 6 | 10 | 12 | 16 | 18 | 20 | 21 | 24 | 26 | 28 | 29 | 34 | 36 | 38 | 42 | 43 | none |
+
+The counting numbers settle on a 9-entry rule at the 4th term, which then reproduces them by itself
+(checked to 300 terms). The primes need 2.35 more entries per term on average, until the table runs
+out at 19 terms.
+
+3-state totalistic, 8 neighbours (134 entries):
+
+| terms | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 to 30 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| counting numbers 2, 3, 4, … | 3 | 5 | 6 | 12 | 15 | 17 | 19 | 20 | 20 | 20 | 22 | 22 |
+| primes 2, 3, 5, … | 3 | 5 | 11 | 14 | 17 | 20 | 21 | 21 | 23 | 26 | 28 | not settled |
+
+The counting numbers settle on a 22-entry rule at the 12th term, which then reproduces them by
+itself (checked to 300 terms). The primes are still growing at the 12th term; the 13th could not be
+settled with 100 million nodes per search. Rules found for 20 and 30 primes consult 62 and 99
+entries.
+
+```
+cargo run --release -- multistate --grid vn --terms 30                      # exhaustive: 19 primes, 43 of 44 entries
+cargo run --release -- multistate --grid cube-vn --terms 30                 # exhaustive: 2, 3, 5, 7 only
+cargo run --release -- multistate --battery --terms 30 --node-limit 20000000
+cargo run --release -- multistate --states 4 --battery --terms 30 --node-limit 3000000 --max-cells 300
+cargo run --release -- multistate --grid vn --profile --terms 30 --node-limit 50000000
+cargo run --release -- multistate --grid vn --target naturals --terms 300 --max-entries 9
+cargo run --release -- multistate --profile --terms 30 --node-limit 100000000
+cargo run --release -- multistate --profile --target naturals --terms 30
+cargo run --release -- multistate --grid hex --class isotropic --show-rule  # print the best rule's entries
 ```
 
 ## A cellular automaton whose count is the next prime
@@ -730,6 +883,13 @@ from every starting pattern as well (pair reduction): every symmetric class dies
 seven primes when it is small enough to exhaust. Symmetric classes with millions of entries fit 30
 primes only by consulting hundreds of entries. The cheapest long fits are wheels for 2 and 3 that
 break at 25.
+
+Cells with three or four states change the capacity, not the picture (see "More states per cell"):
+symmetric rules still cannot leave a single cell, and from two cells they fit long prefixes only
+by filling their tables. The smallest 3-state class settles it exactly: 19 primes, 43 of its 44
+entries, with the smallest rule for each prefix growing by 2.35 entries per prime, while the
+counting numbers need only 9 entries, checked to 300 terms (22 in the 8-neighbour class). Its 3D
+counterpart stops at 2, 3, 5, 7.
 
 A rule that does generate the primes exists once it is allowed to compute (see "A cellular
 automaton whose count is the next prime"):

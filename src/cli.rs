@@ -56,6 +56,8 @@ COMMANDS:
     primeca   Run the 2D prime-counting automaton (64-bit cells) from one set cell and check
               that the number of set cells is the next prime after every step
     primecols Run the 3D finite-alphabet version (numbers as digit columns) and check it
+    multistate  Rules with 3 or more states per cell (totalistic, isotropic or full tables) from
+              one or two cells: the longest run of primes and the smallest rule for each prefix
     sweep     Symmetric families (Life-like, von Neumann totalistic and isotropic) in any
               dimension up to 21, from every starting pattern: the longest run of primes
     space     Compare the legacy search-space size with the new one, per dimension
@@ -172,6 +174,23 @@ OPTIONS (primecols):
     --report N              print every N clock steps                  [default: about 10 lines]
     --certificate           timing certificate for every row (with --w, default 64)
 
+OPTIONS (multistate):
+    --states K              states per cell, 2..6 (0 = empty)                   [default: 3]
+    --grid G                line | square | vn | hex | cube | cube-vn          [default: square]
+    --class C               totalistic | isotropic | table                 [default: totalistic]
+    --lit L                 any (every non-empty cell counts) | one (only state 1 counts,
+                            the other states are hidden helpers)                [default: any]
+    --start S               one (one lit cell) | pair (every close pair; with --lit any this
+                            covers every starting pattern)     [default: pair, one for tables]
+    --terms N               terms of the target                                 [default: 20]
+    --target NAME           primes | naturals | odds | squares (controls)    [default: primes]
+    --node-limit N          stop after about N search nodes (per search)  [default: 200000000]
+    --profile               the exact smallest rule for each prefix of the target
+    --max-cells N           skip configurations with more non-empty cells     [default: 1000]
+    --max-entries E         skip rules consulting more than E table entries
+    --show-rule             print the table entries of the best rule found
+    --battery               run every grid and class (with --states, --terms, --node-limit)
+
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
 
@@ -185,7 +204,7 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 10] = [
+const FLAG_NAMES: [&str; 13] = [
     "no-symmetry",
     "first",
     "sequential",
@@ -196,6 +215,9 @@ const FLAG_NAMES: [&str; 10] = [
     "direct",
     "certificate",
     "plain",
+    "battery",
+    "show-rule",
+    "profile",
 ];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -1288,6 +1310,212 @@ fn run_primecols(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `multistate`: rules with three or more states per cell (src/multi_state.rs).
+fn run_multistate(opts: &Options) -> Result<(), String> {
+    use crate::multi_state::{
+        profile, search, search_target, target_for, Class, Grid, Lit, Spec, Start,
+    };
+    let states = opts.number::<u8>("states")?.unwrap_or(3);
+    let terms = opts.number::<usize>("terms")?.unwrap_or(20);
+    let node_limit = opts.number::<u64>("node-limit")?.unwrap_or(200_000_000);
+    let max_cells = opts.number::<usize>("max-cells")?;
+    let max_entries = opts.number::<usize>("max-entries")?;
+    let configure = |spec: &mut Spec| {
+        if let Some(cap) = max_cells {
+            spec.max_cells = cap;
+        }
+        if let Some(cap) = max_entries {
+            spec.max_entries = cap;
+        }
+    };
+    let run_text = |target: &[usize], run: usize| -> String {
+        let shown: Vec<String> = target[..run].iter().map(|p| p.to_string()).collect();
+        shown.join(", ")
+    };
+    if opts.flag("battery") {
+        println!(
+            "rules with {} states per cell, every grid and class; target: the first {} primes; node limit {} per search",
+            states, terms, node_limit
+        );
+        println!("start: with 'any', every starting pattern (close pairs); with 'one', one or two lit cells");
+        println!(
+            "{:<38} {:<11} {:<4} {:>16} {:>4}  {:<30} {:>8} {:>13} {:>9}",
+            "grid",
+            "class",
+            "lit",
+            "entries",
+            "run",
+            "longest run of primes",
+            "rule",
+            "nodes",
+            "time"
+        );
+        let grids = [
+            Grid::Square,
+            Grid::SquareVonNeumann,
+            Grid::Hexagonal,
+            Grid::Cube,
+            Grid::CubeVonNeumann,
+        ];
+        for grid in grids {
+            for class in [Class::Totalistic, Class::Isotropic] {
+                for lit in [Lit::NonZero, Lit::One] {
+                    let mut spec = match Spec::new(grid, class, states, lit) {
+                        Ok(spec) => spec,
+                        Err(_) => continue,
+                    };
+                    configure(&mut spec);
+                    let result = search(&spec, Start::Pair, terms, node_limit)?;
+                    let best = result.best();
+                    let rule =
+                        result.min_entries()[best].map_or("-".to_string(), |e| e.to_string());
+                    println!(
+                        "{:<38} {:<11} {:<4} {:>16} {:>4}  {:<30} {:>8} {:>13} {:>9.1?}{}",
+                        grid.name(),
+                        class.name(),
+                        if lit == Lit::NonZero { "any" } else { "one" },
+                        grouped_u128(spec.entries()),
+                        best,
+                        run_text(&result.target, best),
+                        rule,
+                        grouped(result.nodes),
+                        result.elapsed,
+                        if result.complete { "" } else { "  (partial)" }
+                    );
+                }
+            }
+        }
+        println!(
+            "run: terms of 2, 3, 5, 7, ... reproduced (the two starting cells count as the first)"
+        );
+        println!("rule: fewest table entries any rule consults to reproduce that run");
+        return Ok(());
+    }
+    let grid = Grid::parse(&opts.text("grid", "square"))?;
+    let class = Class::parse(&opts.text("class", "totalistic"))?;
+    let lit = Lit::parse(&opts.text("lit", "any"))?;
+    let default_start = if class.is_symmetric() { "pair" } else { "one" };
+    let start = match opts.text("start", default_start).as_str() {
+        "one" => Start::One,
+        "pair" => Start::Pair,
+        other => return Err(format!("unknown start '{}' (one | pair)", other)),
+    };
+    let mut spec = Spec::new(grid, class, states, lit)?;
+    configure(&mut spec);
+    let name = opts.text("target", "primes");
+    let target = target_for(&name, start, terms)?;
+    println!(
+        "rules with {} states per cell on the {} grid, {}: {} table entries",
+        states,
+        grid.name(),
+        class.name(),
+        grouped_u128(spec.entries())
+    );
+    println!("cells that count: {}", lit.name());
+    if opts.flag("profile") {
+        println!(
+            "smallest rule for each prefix of {} ({}), from {}: exact (every smaller rule ruled out by a complete search)",
+            name,
+            run_text(&target, target.len().min(6)) + ", ...",
+            if start == Start::One { "one lit cell" } else { "every close pair" }
+        );
+        println!(
+            "{:>6} {:>8} {:>8} {:>14}",
+            "terms", "last", "entries", "nodes"
+        );
+        let started = std::time::Instant::now();
+        let points = profile(&mut spec, start, &target, node_limit, |point| {
+            println!(
+                "{:>6} {:>8} {:>8} {:>14}   {:.1?}",
+                point.terms,
+                target[point.terms - 1],
+                point.entries,
+                grouped(point.nodes),
+                started.elapsed()
+            );
+        })?;
+        let reached = points.last().map_or(1, |p| p.terms);
+        if reached < target.len() {
+            println!(
+                "stopped after {} terms: the next bound needs more than {} nodes, or no rule of the class reaches it",
+                reached, node_limit
+            );
+        }
+        return Ok(());
+    }
+    let result = search_target(&spec, start, target, node_limit)?;
+    println!(
+        "start: {}; target: {}, ...",
+        match (start, lit) {
+            (Start::One, _) => "one lit cell".to_string(),
+            (Start::Pair, Lit::NonZero) => format!(
+                "every close pair ({} seeds), which covers every starting pattern",
+                result.seeds.len()
+            ),
+            (Start::Pair, Lit::One) => format!(
+                "two lit cells, every close pair ({} seeds)",
+                result.seeds.len()
+            ),
+        },
+        run_text(&result.target, result.target.len().min(6))
+    );
+    println!(
+        "\n  {:<36} {:>4}  {:<30} {:>8} {:>13}",
+        "seed", "run", "primes reproduced", "rule", "nodes"
+    );
+    for seed in &result.seeds {
+        println!(
+            "  {:<36} {:>4}  {:<30} {:>8} {:>13}",
+            seed.seed.describe(),
+            seed.best,
+            run_text(&result.target, seed.best),
+            seed.min_entries[seed.best].map_or("-".to_string(), |e| e.to_string()),
+            grouped(seed.nodes)
+        );
+    }
+    let best = result.best();
+    println!(
+        "\nlongest run: {} terms ({}), {} ({} nodes, {:.2?})",
+        best,
+        run_text(&result.target, best),
+        if result.complete {
+            "exhaustive: no rule of the class does better"
+        } else {
+            "partial: the node limit was reached"
+        },
+        grouped(result.nodes),
+        result.elapsed
+    );
+    let entries: Vec<String> = result
+        .min_entries()
+        .iter()
+        .enumerate()
+        .skip(2)
+        .filter_map(|(terms, e)| e.map(|e| format!("{} -> {}", result.target[terms - 1], e)))
+        .collect();
+    println!(
+        "fewest table entries to reach each term{}: {}",
+        if result.complete {
+            ""
+        } else {
+            " (upper bounds)"
+        },
+        entries.join(" | ")
+    );
+    if opts.flag("show-rule") {
+        if let Some(seed) = result.best_seed() {
+            println!(
+                "\nbest rule from {} (only the entries its run consults):",
+                seed.seed.describe()
+            );
+            for (key, state) in &seed.witness {
+                println!("  {} -> {}", spec.describe_key(*key), state);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `sweep`: symmetric families from every starting pattern, dimension by dimension.
 fn run_sweep(opts: &Options) -> Result<(), String> {
     use crate::dimension_sweep::{sweep, Family, MAX_SWEEP_DIM};
@@ -1778,6 +2006,7 @@ pub fn run() {
         "mask" => parse_options(&args[1..]).and_then(|o| run_mask(&o)),
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "sweep" => parse_options(&args[1..]).and_then(|o| run_sweep(&o)),
+        "multistate" => parse_options(&args[1..]).and_then(|o| run_multistate(&o)),
         "demo" => parse_options(&args[1..]).and_then(|o| run_demo(&o)),
         "primeca" => parse_options(&args[1..]).and_then(|o| run_primeca(&o)),
         "primecols" => parse_options(&args[1..]).and_then(|o| run_primecols(&o)),

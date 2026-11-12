@@ -22,14 +22,17 @@ lit cells   1   2   3   5   7   11   13   17   19   23   29   ...
 
 - **No simple rule does it.** We searched every rule in many families of simple rules (the
   Game of Life is one of them), from every possible starting pattern, on square, hexagonal and
-  cubic grids and in up to 21 dimensions. The best simple rule follows the primes as far as 2, 3,
-  5, 7, 11, 13, 17 and then gives 21. Rules that match longer stretches only manage it by
-  memorising the list.
-- **A rule that does it exists, and we built one.** It is the animation above, and it works in two
-  dimensions. Its cells do more than switch on and off: each one quietly works out whether its
-  number is prime, and exactly when its turn comes to light up.
-- **A three-dimensional version stays exact forever**, with only a limited amount of information
-  in each cell. A two-dimensional version could most likely do the same, but hasn't been built.
+  cubic grids, in up to 21 dimensions, and with cells that have 3 or 4 states instead of just on
+  and off. The best simple on/off rule follows the primes as far as 2, 3, 5, 7, 11, 13, 17 and then
+  gives 21. Rules that match longer stretches, including those with more states, only manage it
+  by memorising the list.
+- **A rule that does it exists, and we built one.** It is the animation above. Its cells do more
+  than switch on and off: each one quietly works out whether its number is prime, and exactly when
+  its turn comes to light up.
+- **You don't need 3D.** The rule above is two-dimensional and exact for the first 10¹⁷ steps,
+  after which its 64-bit numbers overflow. A three-dimensional version, which stacks the digits of
+  huge numbers, is exact forever with only a limited amount of information in each cell. Laying
+  those stacks flat should do the same in 2D, but that hasn't been built.
 - **One dimension is impossible**, for any rule at all: a line of cells can't grow fast enough.
 
 ## Demo
@@ -152,13 +155,81 @@ What it found:
 - **The cheapest near-misses are fooled by 25.** The simplest rules that get furthest actually
   produce the numbers that aren't divisible by 2 or 3: 5, 7, 11, 13, 17, 19, 23, and then
   25 = 5 × 5.
+- **One cell can't even start.** A rule that treats all directions alike can never turn one cell
+  into 2 or 3: everything it grows from one cell comes in symmetric groups of 4 or more cells. That
+  holds on square, hexagonal and cubic grids in any number of dimensions, however many states a
+  cell has.
 - **Longer matches are memorisation.** With big enough rule tables, a search matched 72 primes in a
   row. But each extra prime cost about three more table entries: the rule was storing the list,
   not producing it. For simple sequences such as 1, 2, 3, 4, … or the square numbers, the number of
   entries needed stops growing straight away. For the primes it never did.
 
-The lesson: a rule that keeps producing primes has to compute them, and a rule that computes is not
-simple. So we built one.
+### More states per cell
+
+Maybe on/off cells are just too plain. So we also searched rules whose cells have 3 or 4 states,
+like colours. We tried two ways of counting: every non-empty cell counts, or only one state counts
+and the others are hidden helpers, like the hidden machinery of the rule we built.
+
+Extra states let a rule match far more primes than on/off rules of the same kind, but only as many
+as its table can store. Every few primes need new table entries, and the best rules use almost
+their whole table. Here are the 3-state rules that treat all directions alike, from any starting
+pattern:
+
+| 3-state rules | table entries | longest run of primes found | entries that rule uses |
+|---|---|---|---|
+| Life-like, 4 neighbours | 44 | 19 (2 to 67), and no rule of this kind does better | 43 |
+| direction-blind, 4 neighbours | 62 | 22 (2 to 79) | 57 |
+| Life-like, hexagonal grid | 83 | 27 (2 to 103) | 79 |
+| Life-like, 8 neighbours | 134 | 30 (2 to 113), as far as we asked | 99 |
+| direction-blind, hexagonal grid | 275 | 30, as far as we asked | 111 |
+| direction-blind, 8 neighbours | 2,861 | 30, as far as we asked | 140 |
+| Life-like, 3D, 6 neighbours | 83 | 4 (2 to 7), and no rule of this kind does better | 7 |
+| direction-blind, 3D, 6 neighbours | 167 | 30, as far as we asked | 114 |
+| Life-like, 3D, 26 neighbours | 1,133 | 30, as far as we asked | 215 |
+| direction-blind, 3D, 26 neighbours | about 159 billion | 30, as far as we asked | 308 |
+
+("Life-like" rules look only at how many neighbours are in each state; "direction-blind" rules
+look at the whole pattern of neighbours, up to rotations and reflections.)
+
+Going to 3D doesn't help. The 3D Life-like rules with 6 neighbours can't get past 2, 3, 5, 7 (we
+checked every one), while their 2D cousins with 4 neighbours reach 67, most likely because in 3D,
+symmetry ties cells together in bigger groups. The 26-neighbour 3D rules found for 30 primes use
+about twice as many entries as the 8-neighbour 2D ones. With 4 states per cell, every family
+reaches 30 primes, but its table is bigger too: the rules found use 101 to 308 entries to do it.
+Hidden helpers mostly make the rules bigger, not better.
+
+The difference shows best next to a sequence that a rule really can generate. In the smallest of
+these classes (3-state Life-like rules on the 4-neighbour grid, 44 table entries) we could check
+every rule. This is the smallest rule that matches the first terms of each sequence:
+
+| terms matched | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20+ |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| counting numbers 2, 3, 4, … | 3 | 6 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 |
+| primes 2, 3, 5, … | 3 | 6 | 6 | 10 | 12 | 16 | 18 | 20 | 21 | 24 | 26 | 28 | 29 | 34 | 36 | 38 | 42 | 43 | none |
+
+For the counting numbers, a 9-entry rule takes over at the 4th term and then runs on by itself; we
+checked it to 300. For the primes, the smallest rule grows by about 2 to 3 entries per prime. At
+19 primes (2 to 67) it needs 43 of the 44 entries, and no rule of this kind matches a 20th. The
+bigger 8-neighbour class behaves the same way: 22 entries cover the counting numbers (again checked
+to 300), while the primes need 28 entries for their first 12 terms and keep growing. That is
+memorising: more states just make a bigger table to store the answers in.
+
+### Could the primes come about naturally?
+
+Our rule finds the primes by checking them, which can feel like cheating: you'd want a rule whose
+count just *turns out* to be the primes. That is exactly what the searches looked for, and the
+findings above all point the same way:
+
+- the simplest near-misses are filters that skip multiples of 2 and 3. To go past 25 a rule needs
+  a new filter for 5, then 7, then 11, forever: ever-growing machinery that is, in effect, finding
+  primes;
+- rules that treat all directions alike, as physical laws do, can't even start from one cell;
+- every long match, with any number of states, stores the primes rather than producing them.
+
+So any rule whose count is exactly the primes has to work them out somewhere. Even the Game of
+Life's prime machine does, with colliding gliders. "Natural" can only mean that this work is hidden
+inside simple-looking behaviour, not that it's absent. We can't prove that no simple rule exists,
+but every search points that way. That is why we built one instead.
 
 **What was known before.** Cellular automata can already signal the primes in time. A known
 one-dimensional automaton (Fischer, 1965; Korec, 1997) switches one particular cell on exactly at
@@ -176,6 +247,12 @@ the universe has. What this project shows is more modest:
 - **2D is enough.** A flat sheet has plenty of room, and the rule above works there.
 - **3D was used for convenience**, to give each big number room to stack its digits. It could most
   likely be flattened back into 2D.
+- **3D doesn't help simple rules either.** In our searches, 3D rules used more table entries per
+  prime than 2D ones, and the smallest 3D family stops at 7. In 3D, symmetry ties more cells
+  together, so the count jumps too far at once.
+- **No number of dimensions rescues a direction-blind rule from a single cell.** If the rule treats
+  all directions alike and everything starts from one cell, the count can never even reach 2, in
+  any dimension.
 
 So the dimension tells you how much room a computation needs, not something about prime numbers or
 about physics.
@@ -197,8 +274,11 @@ about physics.
   - Its countdowns were tested with the real clock.
   - A timing certificate covers every row, forever: numerically up to row 10¹⁵⁰, and by an
     estimate beyond. In the worst case the cells need at most 27% of the time they have.
-- **The tests can fail.** Bugs planted on purpose in the countdown logic are all caught. Run
-  `cargo test --release` for the whole suite.
+- **The searches were cross-checked.** With two states, the search for rules with more states
+  gives exactly the results of the original on/off searches. On a small 3-state class it gives
+  exactly what trying every one of its 129 million rules by brute force gives.
+- **The tests can fail.** Bugs planted on purpose in the countdown logic and in the searches are
+  all caught. Run `cargo test --release` for the whole suite.
 
 ## What this is not
 
@@ -227,6 +307,11 @@ You need Rust (`cargo`).
 | `cargo run --release -- primecols --w 4 --k 6000 --rows 40` | run the 3D version with 4-bit digits, so stacks appear from row 2 |
 | `cargo run --release -- search --class totalistic --any-start --terms 30` | try every Life-like rule from every starting pattern |
 | `cargo run --release -- sweep --min-dim 2 --max-dim 21 --terms 14` | symmetric rule families in 2 to 21 dimensions |
+| `cargo run --release -- multistate --grid vn --terms 30` | every 3-state Life-like rule on the 4-neighbour grid, from every starting pattern |
+| `cargo run --release -- multistate --grid vn --profile --terms 30` | the smallest such rule for each stretch of the primes (takes several minutes) |
+| `cargo run --release -- multistate --grid vn --profile --target naturals --terms 30` | the same for the counting numbers |
+| `cargo run --release -- multistate --grid cube-vn --terms 30` | the same family in 3D, where nothing gets past 7 |
+| `cargo run --release -- multistate --states 4 --battery --terms 30 --node-limit 3000000` | every 4-state grid and family |
 | `cargo run --release -- help` | every command and option |
 | `cargo test --release` | the test suite |
 
@@ -238,6 +323,7 @@ You need Rust (`cargo`).
 | `src/prime_columns.rs` | the 3D version, with numbers as stacks of digits |
 | `src/demo.rs` | the terminal demo and the animation |
 | `src/table_search.rs`, `src/rule_class.rs`, `src/dimension_sweep.rs`, `src/lattice.rs` | the searches for a simple rule |
+| `src/multi_state.rs` | the search over rules whose cells have 3 or more states |
 | `src/bounds.rs` | the impossibility proofs (one dimension, symmetric rules) |
 | `src/construct.rs`, `src/prime_worker.rs`, `src/scheduler.rs` and others | the unfinished on/off-only construction |
 | `src/state_explorer.rs`, `src/space.rs`, `src/rule.rs` | the original formula-based search (`legacy`) |
