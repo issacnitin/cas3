@@ -60,6 +60,8 @@ COMMANDS:
               one or two cells: the longest run of primes and the smallest rule for each prefix
     constant-time  Can any rule turn p lit cells into the next prime in a fixed number of steps?
               Prints the consecutive primes that rule out every rule of a given light cone
+    next-prime  From p lit cells and nothing else to exactly the next prime: a 2D rule taking about
+              sqrt(p) steps (no rule can be much faster), checked by direct runs
     sweep     Symmetric families (Life-like, von Neumann totalistic and isotropic) in any
               dimension up to 21, from every starting pattern: the longest run of primes
     space     Compare the legacy search-space size with the new one, per dimension
@@ -200,6 +202,12 @@ OPTIONS (constant-time):
     --limit N               scan the primes up to N, at most 10^14      [default: 1000000000]
     --records               list every record of (next gap) / (gap) up to N, and the largest
                             number of steps it rules out in 1 to 6 dimensions
+
+OPTIONS (next-prime):
+    --sim N                 run the rule from the staircase of every p from 1 to N   [default: 2000]
+    --limit N               settle-step table for every prime up to N, at most 10^12
+                                                                          [default: 100000000]
+    --show P                draw the run for one p (at most 5000) before and after it settles
 
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
@@ -1660,6 +1668,102 @@ fn run_constant_time(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `next-prime`: from p lit cells and nothing else to exactly the next prime, in about sqrt(p) steps.
+fn run_next_prime(opts: &Options) -> Result<(), String> {
+    use crate::bare_prime::{decades, next_prime, settle_time, simulate, Run};
+    use rayon::prelude::*;
+    if let Some(p) = opts.number::<u64>("show")? {
+        if !(1..=5000).contains(&p) {
+            return Err("--show needs 1 <= P <= 5000".into());
+        }
+        let q = next_prime(p);
+        let mut run = Run::new(p);
+        println!("step 0: {} lit cells, the staircase of 1..{}", run.lit(), p);
+        print!("{}", run.render());
+        while run.step < settle_time(p, q) {
+            run.advance();
+        }
+        println!(
+            "\nstep {}: {} lit cells ('#'), the next prime; 'o' = candidates that stay unlit",
+            run.step,
+            run.lit()
+        );
+        print!("{}", run.render());
+        return Ok(());
+    }
+    let sim = opts.number::<u64>("sim")?.unwrap_or(2000);
+    let limit = opts.number::<u64>("limit")?.unwrap_or(100_000_000);
+    if !(1..=100_000).contains(&sim) || !(10..=1_000_000_000_000).contains(&limit) {
+        return Err("need 1 <= --sim <= 100000 and 10 <= --limit <= 10^12".into());
+    }
+    println!(
+        "input: p lit cells in the staircase (rows of 1, 2, 3, ... cells), nothing else; goal: exactly q lit\ncells from some step T(p) on, q the first prime after p"
+    );
+    let started = std::time::Instant::now();
+    let failures: Vec<String> = (1..=sim)
+        .into_par_iter()
+        .filter_map(|n| {
+            let q = next_prime(n);
+            match simulate(n, 10_000_000) {
+                Err(e) => Some(e),
+                Ok(o) if o.lit != q => Some(format!(
+                    "p = {}: ended with {} lit cells, not {}",
+                    n, o.lit, q
+                )),
+                Ok(o) if o.settled != settle_time(n, q) => Some(format!(
+                    "p = {}: settled at step {}, not {}",
+                    n,
+                    o.settled,
+                    settle_time(n, q)
+                )),
+                Ok(_) => None,
+            }
+        })
+        .collect();
+    println!(
+        "direct runs, every p from 1 to {}: {} ({:.2?})",
+        grouped(sim),
+        if failures.is_empty() {
+            "the count settles at the next prime at step T(p) = row(p) + 2 (q - p) + floor(sqrt q),\nstays there, and the rule stops".to_string()
+        } else {
+            format!("{} FAILURES, first: {}", failures.len(), failures[0])
+        },
+        started.elapsed()
+    );
+    let started = std::time::Instant::now();
+    let table = decades(limit);
+    println!(
+        "\nT(p) for every prime p up to {} ({:.2?}):",
+        grouped(limit),
+        started.elapsed()
+    );
+    println!(
+        "{:>20} {:>20} {:>14} {:>15} {:>16} {:>20}",
+        "primes from", "below", "count", "mean T/sqrt p", "worst T/sqrt p", "at p"
+    );
+    for d in &table {
+        println!(
+            "{:>20} {:>20} {:>14} {:>15.3} {:>16.3} {:>20}",
+            grouped(d.from),
+            grouped(d.to),
+            grouped(d.primes),
+            d.mean,
+            d.worst,
+            grouped(d.worst_at)
+        );
+    }
+    println!(
+        "\nT(p) / sqrt(p) tends to 1 + sqrt 2 = 2.414 while the gaps q - p stay small next to sqrt(p) (as they\ndo here): about sqrt(2p) steps to read p, sqrt(p) to test q"
+    );
+    println!(
+        "the hardest primes need about sqrt(p) steps for any rule: for any rule of radius 1, with any\nstates, some prime up to P needs at least (1 - o(1)) sqrt(P) / 20 steps (proof in src/bare_prime.rs)"
+    );
+    if !failures.is_empty() {
+        return Err(format!("{} direct runs failed", failures.len()));
+    }
+    Ok(())
+}
+
 /// `sweep`: symmetric families from every starting pattern, dimension by dimension.
 fn run_sweep(opts: &Options) -> Result<(), String> {
     use crate::dimension_sweep::{sweep, Family, MAX_SWEEP_DIM};
@@ -2152,6 +2256,7 @@ pub fn run() {
         "sweep" => parse_options(&args[1..]).and_then(|o| run_sweep(&o)),
         "multistate" => parse_options(&args[1..]).and_then(|o| run_multistate(&o)),
         "constant-time" => parse_options(&args[1..]).and_then(|o| run_constant_time(&o)),
+        "next-prime" => parse_options(&args[1..]).and_then(|o| run_next_prime(&o)),
         "demo" => parse_options(&args[1..]).and_then(|o| run_demo(&o)),
         "primeca" => parse_options(&args[1..]).and_then(|o| run_primeca(&o)),
         "primecols" => parse_options(&args[1..]).and_then(|o| run_primecols(&o)),

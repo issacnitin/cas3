@@ -717,13 +717,133 @@ How the records were checked:
   work for each prime is done in advance, not saved.
 * From a bare prime, the time must grow with $p$. A rule that works for every prime up to $x$
   needs $(2rk+1)^d$ to be at least the largest ratio $d_{n+1}/d_n$ up to $x$, which by Pintz's
-  theorem eventually exceeds $\ln x$. This only rules out constant time; it says nothing about
-  how fast a rule that starts from a bare prime could be.
+  theorem eventually exceeds $\ln x$. For the staircase layout the true answer is much larger,
+  about $\sqrt p$ steps (next section).
 
 ```
 cargo run --release -- constant-time                                   # 2D, one step: 1,667, 1,669, 1,693
 cargo run --release -- constant-time --dim 3 --steps 2 --limit 3000000000
 cargo run --release -- constant-time --records --limit 100000000000    # every record up to 10^11
+```
+
+## From a bare prime: about $\sqrt p$ steps
+
+Constant time is impossible, so how fast can a rule get from a bare prime to the next one? The input
+is the staircase of `prime_display`: row $y=1,2,\dots$ holds $y$ cells, numbered $1,2,3,\dots$ row
+by row, and the input is the cells of $1,\dots,p$, all lit, on an empty background. $T(p)$ is the
+step from which the rule shows exactly $q$ lit cells, $q$ the next prime, for good. For the hardest
+primes no rule beats about $\sqrt p/20$ steps (Theorem 3), and the rule below takes about
+$2.414\sqrt p$ steps while the gaps between primes are small next to $\sqrt p$
+(`src/bare_prime.rs`, command `next-prime`).
+
+**Theorem 3 (lower bound).** For any rule of radius $r$, with any states (even infinitely many),
+some prime $p\le P$ has $T(p)\ge(1-o(1))\sqrt P/(20r)$ as $P\to\infty$.
+
+*Proof.*
+
+1. *Census.* After $T$ steps a cell depends only on the input in the box of radius $R=rT$ around
+   it. The input has two states, and an all-empty box gives an empty cell, so the count after $T$
+   steps is $\sum_B[B\text{ ends lit}]\,N_B(p)$, where $N_B(p)$ is the number of cells whose box
+   has content $B$.
+2. *Affine counts.* Write $p=Y(Y+1)/2+t$ with $1\le t\le Y+1$: rows $1,\dots,Y$ are full and row
+   $Y+1$ holds $t$ cells. In the middle regime $Y\ge8R+8$, $2R+3\le t\le Y-4R-4$, the boxes that
+   see the end of the partial row see no other corner, and every other box sees one straight
+   edge, a fixed corner or nothing. So every $N_B$, and the count, has the form
+   $AY^2+BY+Ct+D$ with $C\in\mathbb Z$. A test checks this on random two-state rules for
+   $T=1,2,3$; just outside the regime it fails for every rule tried.
+3. *Few primes per row.* Let $T=\max_{p\le P}T(p)$. If consecutive primes $p_i<p_{i+1}$ lie in the
+   middle of the same row, then $t_{i+1}-t_i=p_{i+1}-p_i=(\text{count})-p_i$, so
+   $t_{i+1}=Ct_i+K$ with $K$ depending only on the row. If $C\le0$ there are at most 2 of them.
+   If $C=1$ they are $k$ consecutive primes in arithmetic progression: every prime up to $k$
+   divides the difference, and $k-1$ differences fit in the row, so $k\le(1+o(1))\ln Y$. If
+   $C\ge2$, $t+K/(C-1)$ grows geometrically, so $k\le2+\log_2Y$. The middle of each row holds
+   $O(\ln P)$ primes.
+4. *Counting.* The primes in $(P/2,P]$ lie in $(\sqrt2-1+o(1))\sqrt P$ rows. The two ends of a row
+   have $2R+2$ and $4R+5$ numbers, and $N>1$ consecutive numbers hold fewer than $2N/\ln N$ primes
+   (Montgomery and Vaughan, *The large sieve*, Mathematika 20, 1973, inequality (1.12)). Since
+   $(P/2,P]$ holds $(1+o(1))P/(2\ln P)$ primes,
+   $(\sqrt2-1)\sqrt P\,(12R+14)/\ln(2R+2)\ge(1-o(1))P/(2\ln P)$, so
+   $2R+2\ge(1-o(1))\sqrt P/10$. (When $Y\ge8R+8$ fails, $R>\sqrt P/9$ anyway.) $\square$
+
+On a line of $p$ cells the same argument gives $T(p)\ge P/(4r)$ for some prime $p\le P$: once
+$p\ge2R$ the count is $ap+e$ with $a\in\{0,1\}$, so every gap would be the same. In $d$ dimensions,
+on a $d$-dimensional staircase filled row by row, the same argument should give about $p^{1/d}$; that
+case has not been written out.
+
+**Construction.** A 2D rule of radius 1 (it reads 5 of the 8 neighbours), with cells holding
+64-bit numbers as in `prime_display` (exact while the numbers fit):
+
+* *numbering:* the apex (nothing below or below-left) is 1 in row 1. A cell above a numbered cell
+  of row $y$ gets $n+y$; the last cell of a row gets $n+y+1$ from below-left. Row $y$ is numbered
+  at step $y$;
+* *top row:* the first cell of the top row (nothing to its left or above) starts a flag that moves
+  right. The flagged cell with nothing to its right is the last one, $p$, from step
+  $\mathrm{row}(p)$;
+* *candidates:* the last cell starts a line of candidates $p+1,p+2,\dots$ to its right, one every
+  two steps. Each tries one divisor per step;
+* *token:* a candidate lights up when its left neighbour holds the token (the last cell, or a lit
+  composite) and its own answer is known. A composite passes the token on. The first prime keeps
+  it and sends a stop signal right, which catches the line because the line grows at half speed.
+
+The lit cells end as $1,\dots,q$, for good, and
+
+$$T(p)=\mathrm{row}(p)+2(q-p)+\lfloor\sqrt q\rfloor,$$
+
+where $\mathrm{row}(p)\approx\sqrt{2p}$ is the row of $p$. Candidate $p+j$ is created at step
+$\mathrm{row}(p)+2j-1$ and is decided $\lfloor\sqrt n\rfloor$ steps later if it is prime, or
+$\mathrm{spf}(n)-1\le\lfloor\sqrt n\rfloor-1$ steps later if not. The token reaches $p+j$ one step
+after it has reached $p+j-1$ and $p+j$ is decided. Unrolling this, the last to be ready is $q$
+itself.
+
+So $T(p)\approx(1+\sqrt2)\sqrt p+2(q-p)$. It is $O(\sqrt p)$, within a constant factor of
+Theorem 3, whenever the gap $q-p$ is $O(\sqrt p)$. That holds for every prime checked (below,
+$T(p)\le5.67\sqrt p$ for every prime up to $10^{11}$, and $T(p)<2.44\sqrt p$ beyond $10^9$), and
+Cramér's conjecture predicts it always. It is not proved: unconditionally the gap is only known to
+be $O(p^{0.525})$ (Baker, Harman and Pintz), so the construction is only proved to take
+$O(p^{0.525})$ steps.
+
+How it was checked:
+
+* direct runs from the staircase of every $p$ from 1 to 10,000, prime or not: the count settles at
+  the next prime at exactly the step above, never drops, and the rule then stops changing;
+* the census lemma (step 2) on random rules, with the negative control just outside the regime;
+* the table below comes from the formula, for every prime up to $10^{11}$; the prime counts per
+  decade add up to $\pi(10^k)$.
+
+| primes | how many | mean $T(p)/\sqrt p$ | worst $T(p)/\sqrt p$ | at $p$ |
+|---|---|---|---|---|
+| below 10 | 4 | 4.462 | 5.669 | 7 |
+| $10$ to $10^2$ | 21 | 3.733 | 5.004 | 23 |
+| $10^2$ to $10^3$ | 143 | 3.010 | 5.080 | 113 |
+| $10^3$ to $10^4$ | 1,061 | 2.665 | 4.282 | 1,327 |
+| $10^4$ to $10^5$ | 8,363 | 2.515 | 3.228 | 31,397 |
+| $10^5$ to $10^6$ | 68,906 | 2.453 | 2.847 | 155,921 |
+| $10^6$ to $10^7$ | 586,081 | 2.429 | 2.641 | 1,357,201 |
+| $10^7$ to $10^8$ | 5,096,876 | 2.420 | 2.506 | 11,113,933 |
+| $10^8$ to $10^9$ | 45,086,079 | 2.416 | 2.454 | 122,164,747 |
+| $10^9$ to $10^{10}$ | 404,204,977 | 2.415 | 2.430 | 1,294,268,491 |
+| $10^{10}$ to $10^{11}$ | 3,663,002,302 | 2.414 | 2.422 | 10,726,904,659 |
+
+The worst primes are mostly where record gaps begin (1,327, 31,397, 155,921, …,
+10,726,904,659). The whole table takes 55 seconds; the direct runs to 10,000 take 31.
+
+**And $\ln p$?** Out of reach for this input: by Theorem 3 the hardest primes need a number of steps
+proportional to $\sqrt p$, which grows far faster than $\ln p$. The obstacle is the input format,
+not arithmetic, since Theorem 3 holds even when a cell can hold any number. If $p$ were also written
+out in binary, the answer would depend on what a cell may hold. A cell that holds whole numbers
+could compute the next prime in a single step, so the question only makes sense with a bounded
+number of bits per cell. Then the candidates must be tested digit by digit. The standard fast
+primality tests (Miller–Rabin, Lucas, AKS) raise something to a power about $p$ by about $\log_2p$
+squarings one after another. In $d$ dimensions the digits of a $\log p$-digit number span at least
+about $(\log p)^{1/d}$ cells, and every digit of a square modulo $p$ depends on every digit, so each
+squaring takes about that long. That suggests about $(\ln p)^{1+1/d}$ steps with these tests: closer
+to $\ln p$ in more dimensions, but still above it in any fixed dimension. This is an estimate for
+known methods, not a theorem.
+
+```
+cargo run --release -- next-prime                                      # direct runs to 2,000, table to 10^8
+cargo run --release -- next-prime --show 23                            # draw one run
+cargo run --release -- next-prime --sim 10000 --limit 100000000000
 ```
 
 ## Constructive route
@@ -1013,6 +1133,12 @@ of steps (see "The next prime in constant time?"): the light cone bounds how muc
 change when the input grows, and the ratio of consecutive prime gaps is unbounded (Pintz). The
 automaton above gets one step per prime only by working ahead. For such layouts, explicit primes
 up to $10^{11}$ rule out every radius-1 rule finishing within 6 steps in 2D, 2 in 3D and 1 in 4D.
+
+From the staircase alone the answer is of order $\sqrt p$ (see "From a bare prime"). For any rule,
+with any states, the hardest primes up to $P$ need at least $(1-o(1))\sqrt P/20$ steps (Theorem 3).
+A 2D rule takes exactly $\mathrm{row}(p)+2(q-p)+\lfloor\sqrt q\rfloor$ steps, checked by direct runs
+for every $p\le10{,}000$. That is at most $5.67\sqrt p$ for every prime up to $10^{11}$, and
+$O(\sqrt p)$ in general if prime gaps are $O(\sqrt p)$.
 
 The epoch construction described under "Constructive route" is an earlier, unfinished attempt at
 a two-state version; it remains open until the local epoch factory, gap-to-mask transport, arena

@@ -38,6 +38,10 @@ lit cells   1   2   3   5   7   11   13   17   19   23   29   ...
   the prime alone, in any number of dimensions (with bigger primes laid out by adding cells to
   smaller ones). The rule above takes one step per prime only because its hidden machinery has
   been working ahead since the start.
+- **From the prime alone, the next prime takes about √p steps.** We built a rule that turns p lit
+  cells into exactly the next prime's number in about 2.4√p steps (checked for every prime up to
+  100 billion). We also proved that for the hardest primes every rule needs a number of steps
+  proportional to √p. So ln p steps is out of reach.
 
 ## Demo
 
@@ -297,6 +301,54 @@ would have to encode the gap to the next prime: the layout would be doing the wo
 So "the next prime in constant time" exists only in the sense our automaton already has: one step
 per prime, with the work done in advance. It doesn't make finding primes any faster.
 
+## How fast can a rule find the next prime from scratch?
+
+So what is possible? We built a rule that starts from nothing but the prime, as p lit cells in our
+staircase. It ends with exactly the next prime's number of lit cells and stays there. Here it is
+for 23 (top row first), at the start and 24 steps later with 29 lit cells. The `o`s are
+candidates it checked but didn't need:
+
+```
+start: 23 lit       step 24: 29 lit
+##                  ########ooo
+######              ######
+#####               #####
+####                ####
+###                 ###
+##                  ##
+#                   #
+```
+
+It works in three stages:
+
+1. **Find out what p is.** Starting from the bottom corner, the cells number themselves row by
+   row, and the end of the top row learns that it is cell p. That takes one step per row, about
+   √(2p) steps.
+2. **Try the next numbers.** That cell grows a line of candidates p + 1, p + 2, … to its right,
+   and each candidate tests itself for divisors, one per step: about √p steps.
+3. **Light up to the first prime.** The candidates light up in order while they turn out composite,
+   and the first prime lights up last and stops the line.
+
+In total it takes about 2.4√p steps: about √(2p) to find p, about √p to test the next prime, and
+two more per number in between. That last part is small because gaps between primes are small
+next to √p, as far as anyone has checked (nobody has proved they always are). For 999,999,937 it
+comes to 76,483 steps. We checked every starting number up to 10,000 by running the rule, and every
+prime up to 100 billion with its exact timing formula: never more than 5.7√p steps.
+
+**No rule can do fundamentally better with this input**, whatever its cells can hold. We proved
+that for the hardest primes, every rule needs a number of steps proportional to √p (at least about
+√p/20 once p is large). In fewer steps, each cell has seen only a small piece of the staircase.
+From small pieces, the count a rule can produce changes smoothly as the staircase grows, so it
+can't follow the irregular gaps between primes.
+
+So ln p steps (about 21 for primes near a billion) is far out of reach, because √p grows much
+faster. More dimensions should help, since information reaches every cell sooner: the same
+argument suggests about p^(1/d) steps in d dimensions (we haven't proved that case), still far
+above ln p in any fixed dimension. Writing p out in binary as well wouldn't simply fix it. If cells
+can hold whole numbers, one cell could look the answer up in a single step, which says nothing
+about computing. With cells that hold only a few bits, the standard primality tests do about ln p
+multiplications one after another, and on a grid each takes longer the more digits there are.
+
 ## How we know it works
 
 - **Two separate simulators** run the 2D rule. One updates every cell at every step; the other
@@ -354,6 +406,8 @@ You need Rust (`cargo`).
 | `cargo run --release -- multistate --states 4 --battery --terms 30 --node-limit 3000000` | every 4-state grid and family |
 | `cargo run --release -- constant-time` | the primes that rule out a one-step jump to the next prime in 2D (try `--dim 3 --steps 2`) |
 | `cargo run --release -- constant-time --records --limit 100000000000` | every record jump between prime gaps up to 100 billion |
+| `cargo run --release -- next-prime --show 23` | watch the from-scratch rule turn 23 lit cells into 29 |
+| `cargo run --release -- next-prime` | run it from every starting number up to 2,000 and time it for every prime up to 100 million |
 | `cargo run --release -- help` | every command and option |
 | `cargo test --release` | the test suite |
 
@@ -367,6 +421,7 @@ You need Rust (`cargo`).
 | `src/table_search.rs`, `src/rule_class.rs`, `src/dimension_sweep.rs`, `src/lattice.rs` | the searches for a simple rule |
 | `src/multi_state.rs` | the search over rules whose cells have 3 or more states |
 | `src/constant_time.rs` | why no rule jumps to the next prime in a fixed number of steps, and the primes that show it |
+| `src/bare_prime.rs` | the rule that finds the next prime from the prime alone in about √p steps, and why none is much faster |
 | `src/bounds.rs` | the impossibility proofs (one dimension, symmetric rules) |
 | `src/construct.rs`, `src/prime_worker.rs`, `src/scheduler.rs` and others | the unfinished on/off-only construction |
 | `src/state_explorer.rs`, `src/space.rs`, `src/rule.rs` | the original formula-based search (`legacy`) |
