@@ -58,6 +58,8 @@ COMMANDS:
     primecols Run the 3D finite-alphabet version (numbers as digit columns) and check it
     multistate  Rules with 3 or more states per cell (totalistic, isotropic or full tables) from
               one or two cells: the longest run of primes and the smallest rule for each prefix
+    constant-time  Can any rule turn p lit cells into the next prime in a fixed number of steps?
+              Prints the consecutive primes that rule out every rule of a given light cone
     sweep     Symmetric families (Life-like, von Neumann totalistic and isotropic) in any
               dimension up to 21, from every starting pattern: the longest run of primes
     space     Compare the legacy search-space size with the new one, per dimension
@@ -191,6 +193,14 @@ OPTIONS (multistate):
     --show-rule             print the table entries of the best rule found
     --battery               run every grid and class (with --states, --terms, --node-limit)
 
+OPTIONS (constant-time):
+    --dim D                 dimension of the lattice                              [default: 2]
+    --radius R              neighbourhood radius (Moore)                          [default: 1]
+    --steps K               the fixed number of steps                             [default: 1]
+    --limit N               scan the primes up to N, at most 10^14      [default: 1000000000]
+    --records               list every record of (next gap) / (gap) up to N, and the largest
+                            number of steps it rules out in 1 to 6 dimensions
+
 OPTIONS (space):
     --max-dim N             largest dimension in the table             [default: 3]
 
@@ -204,7 +214,7 @@ struct Options {
     flags: HashSet<String>,
 }
 
-const FLAG_NAMES: [&str; 13] = [
+const FLAG_NAMES: [&str; 14] = [
     "no-symmetry",
     "first",
     "sequential",
@@ -218,6 +228,7 @@ const FLAG_NAMES: [&str; 13] = [
     "battery",
     "show-rule",
     "profile",
+    "records",
 ];
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -653,6 +664,10 @@ fn run_any_start_search(
 }
 
 fn grouped(n: u64) -> String {
+    grouped_wide(n as u128)
+}
+
+fn grouped_wide(n: u128) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -1516,6 +1531,135 @@ fn run_multistate(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `constant-time`: the consecutive primes that rule out every rule with a given light cone.
+fn run_constant_time(opts: &Options) -> Result<(), String> {
+    use crate::bounds::light_cone_limit;
+    use crate::constant_time::{are_consecutive_primes, first_refutation, ratio_records};
+    let dim = opts.number::<usize>("dim")?.unwrap_or(2);
+    let radius = opts.number::<usize>("radius")?.unwrap_or(1);
+    let steps = opts.number::<usize>("steps")?.unwrap_or(1);
+    let limit = opts.number::<u64>("limit")?.unwrap_or(1_000_000_000);
+    if dim == 0 || radius == 0 || steps == 0 || !(5..=100_000_000_000_000).contains(&limit) {
+        return Err("need --dim, --radius, --steps >= 1 and 5 <= --limit <= 10^14".into());
+    }
+    let cone = light_cone_limit(dim, radius, steps);
+    let cone_text = if cone == u128::MAX {
+        format!("at least {}", grouped_wide(cone))
+    } else {
+        grouped_wide(cone)
+    };
+    let started = std::time::Instant::now();
+    let (records, count) = ratio_records(limit);
+    let elapsed = started.elapsed();
+    println!(
+        "can a rule turn p lit cells into the next prime in {} step{}? ({} dimension{}, radius {})",
+        steps,
+        if steps == 1 { "" } else { "s" },
+        dim,
+        if dim == 1 { "" } else { "s" },
+        radius
+    );
+    println!(
+        "light cone: after {} step{} a cell depends only on the {} cells within distance {}, so each",
+        steps,
+        if steps == 1 { "" } else { "s" },
+        cone_text,
+        grouped_wide(radius as u128 * steps as u128)
+    );
+    println!("input cell changes at most that many cells of the output");
+    match first_refutation(&records, cone) {
+        Some(t) => {
+            let (first, second) = t.gaps();
+            println!(
+                "ruled out by the consecutive primes {}, {}, {} ({}):",
+                grouped(t.p),
+                grouped(t.q),
+                grouped(t.r),
+                if are_consecutive_primes(&t) {
+                    "confirmed by Miller-Rabin"
+                } else {
+                    "NOT confirmed by Miller-Rabin"
+                }
+            );
+            println!(
+                "  laying out {} instead of {} adds {} lit cells, so the count after {} step{} can grow by at most {} x {} = {},",
+                grouped(t.q),
+                grouped(t.p),
+                first,
+                steps,
+                if steps == 1 { "" } else { "s" },
+                cone_text,
+                first,
+                grouped_wide(cone * first as u128)
+            );
+            println!(
+                "  but it would have to grow from {} to {}, by {}",
+                grouped(t.q),
+                grouped(t.r),
+                second
+            );
+            println!(
+                "so no rule of this size works when each prime's layout is the previous one plus the new lit"
+            );
+            println!(
+                "cells (a line, the staircase, any filling order), even on top of a fixed helper pattern"
+            );
+        }
+        None => println!(
+            "no consecutive primes up to {} rule out a light cone of {} cells; Pintz's theorem\n(arXiv:1406.2658) guarantees that larger ones do",
+            grouped(limit),
+            cone_text
+        ),
+    }
+    if opts.flag("records") {
+        println!(
+            "\nrecords of (next gap) / (gap) up to {}: each beats every earlier triple of consecutive primes",
+            grouped(limit)
+        );
+        println!(
+            "{:>18} {:>18} {:>18} {:>5} {:>5} {:>7} {:>13}",
+            "p", "q", "r", "q-p", "r-q", "ratio", "rules out M <="
+        );
+        for t in &records {
+            let (first, second) = t.gaps();
+            println!(
+                "{:>18} {:>18} {:>18} {:>5} {:>5} {:>7.2} {:>13}",
+                grouped(t.p),
+                grouped(t.q),
+                grouped(t.r),
+                first,
+                second,
+                t.ratio(),
+                t.largest_cone_refuted()
+            );
+        }
+        let best = records.last().map_or(0, |t| t.largest_cone_refuted()) as u128;
+        println!(
+            "\nwith radius {}, these primes rule out every rule that finishes within k steps for k up to:",
+            radius
+        );
+        for d in 1..=6 {
+            let k = (1..)
+                .take_while(|&k| light_cone_limit(d, radius, k) <= best)
+                .last()
+                .unwrap_or(0);
+            println!(
+                "  {} dimension{}: k <= {}",
+                d,
+                if d == 1 { "" } else { "s" },
+                k
+            );
+        }
+    }
+    println!(
+        "\n{} primes up to {} scanned in {:.2?}",
+        grouped(count),
+        grouped(limit),
+        elapsed
+    );
+    Ok(())
+}
+
 /// `sweep`: symmetric families from every starting pattern, dimension by dimension.
 fn run_sweep(opts: &Options) -> Result<(), String> {
     use crate::dimension_sweep::{sweep, Family, MAX_SWEEP_DIM};
@@ -2007,6 +2151,7 @@ pub fn run() {
         "space" => parse_options(&args[1..]).and_then(|o| run_space(&o)),
         "sweep" => parse_options(&args[1..]).and_then(|o| run_sweep(&o)),
         "multistate" => parse_options(&args[1..]).and_then(|o| run_multistate(&o)),
+        "constant-time" => parse_options(&args[1..]).and_then(|o| run_constant_time(&o)),
         "demo" => parse_options(&args[1..]).and_then(|o| run_demo(&o)),
         "primeca" => parse_options(&args[1..]).and_then(|o| run_primeca(&o)),
         "primecols" => parse_options(&args[1..]).and_then(|o| run_primecols(&o)),

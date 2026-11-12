@@ -34,6 +34,10 @@ lit cells   1   2   3   5   7   11   13   17   19   23   29   ...
   huge numbers, is exact forever with only a limited amount of information in each cell. Laying
   those stacks flat should do the same in 2D, but that hasn't been built.
 - **One dimension is impossible**, for any rule at all: a line of cells can't grow fast enough.
+- **No rule can jump from a prime to the next one in a fixed number of steps** if it starts from
+  the prime alone, in any number of dimensions (with bigger primes laid out by adding cells to
+  smaller ones). The rule above takes one step per prime only because its hidden machinery has
+  been working ahead since the start.
 
 ## Demo
 
@@ -257,6 +261,42 @@ the universe has. What this project shows is more modest:
 So the dimension tells you how much room a computation needs, not something about prime numbers or
 about physics.
 
+## Can a rule jump to the next prime in a fixed number of steps?
+
+Our automaton lights up the next prime one step after the last one. But that's because its hidden
+machinery has been working ahead since the start: each step shows a result it worked out earlier.
+What if you hand a rule just a prime, as that many lit cells, and ask for the next prime within,
+say, 5 steps, whatever the prime? **No rule can do that, in any number of dimensions**, however
+many states its cells have, if each prime is laid out as the previous one plus the new lit cells
+(a line, our staircase, a spiral, any fixed order), even on top of a fixed pattern of helper
+cells.
+
+The reason is that information travels at a limited speed. In one step a cell only hears from its
+neighbours, so in 2D one extra lit cell in the input can change at most 9 cells of the output.
+Now take two primes in a row, 1,667 and 1,669. Their inputs differ by 2 cells, so their outputs
+can differ by at most 2 × 9 = 18 cells. But the outputs should be the next primes, 1,669 and
+1,693, which are 24 apart. So no one-step rule in 2D works.
+
+More steps or more dimensions only push the problem further out. Each one lets a cell hear from
+further away, but the gaps between primes can jump by any factor: somewhere, a short gap is
+followed by one as many times longer as you like. Pintz proved this in 2014, settling a question
+Erdős asked in 1955. We list the biggest jumps up to 100 billion. The largest is a gap of 2
+(94,746,870,539 to 94,746,870,541) followed by a gap of 402. With cells that see only their
+immediate neighbours, primes in that range alone rule out every rule that finishes within 6 steps
+in 2D, 2 in 3D or 1 in 4D, and Pintz's result rules out every fixed number of steps.
+
+If the rule has to work however the cells are arranged, it fails even sooner. Two lit cells far
+apart (the prime 2) grow as two separate copies of one cell, so they always end with an even
+number of lit cells, never 3.
+
+What about a layout that rearranges the cells from one prime to the next? In a fixed number of
+steps, each output cell depends only on a small patch of the input, so the final count is just a
+tally of the small patterns in the input. For that tally to be the next prime, the layout itself
+would have to encode the gap to the next prime: the layout would be doing the work.
+
+So "the next prime in constant time" exists only in the sense our automaton already has: one step
+per prime, with the work done in advance. It doesn't make finding primes any faster.
+
 ## How we know it works
 
 - **Two separate simulators** run the 2D rule. One updates every cell at every step; the other
@@ -312,6 +352,8 @@ You need Rust (`cargo`).
 | `cargo run --release -- multistate --grid vn --profile --target naturals --terms 30` | the same for the counting numbers |
 | `cargo run --release -- multistate --grid cube-vn --terms 30` | the same family in 3D, where nothing gets past 7 |
 | `cargo run --release -- multistate --states 4 --battery --terms 30 --node-limit 3000000` | every 4-state grid and family |
+| `cargo run --release -- constant-time` | the primes that rule out a one-step jump to the next prime in 2D (try `--dim 3 --steps 2`) |
+| `cargo run --release -- constant-time --records --limit 100000000000` | every record jump between prime gaps up to 100 billion |
 | `cargo run --release -- help` | every command and option |
 | `cargo test --release` | the test suite |
 
@@ -324,6 +366,7 @@ You need Rust (`cargo`).
 | `src/demo.rs` | the terminal demo and the animation |
 | `src/table_search.rs`, `src/rule_class.rs`, `src/dimension_sweep.rs`, `src/lattice.rs` | the searches for a simple rule |
 | `src/multi_state.rs` | the search over rules whose cells have 3 or more states |
+| `src/constant_time.rs` | why no rule jumps to the next prime in a fixed number of steps, and the primes that show it |
 | `src/bounds.rs` | the impossibility proofs (one dimension, symmetric rules) |
 | `src/construct.rs`, `src/prime_worker.rs`, `src/scheduler.rs` and others | the unfinished on/off-only construction |
 | `src/state_explorer.rs`, `src/space.rs`, `src/rule.rs` | the original formula-based search (`legacy`) |

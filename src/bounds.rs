@@ -42,9 +42,12 @@
 
 use crate::lattice::{Neighbourhood, SymmetryGroup};
 
-/// Largest population a single seed can reach after `t` steps.
+/// Largest population a single seed can reach after `t` steps (saturating, never wrapping).
 pub fn light_cone_limit(dim: usize, radius: usize, t: usize) -> u128 {
-    ((2 * radius * t + 1) as u128).saturating_pow(dim as u32)
+    let side = (2 * radius as u128)
+        .saturating_mul(t as u128)
+        .saturating_add(1);
+    side.saturating_pow(u32::try_from(dim).unwrap_or(u32::MAX))
 }
 
 /// First term (counted from t = 0) of `target` that no rule of this dimension and radius can reach.
@@ -195,6 +198,13 @@ mod test {
         assert_eq!(light_cone_limit(1, 3, 4), 25);
         assert_eq!(light_cone_limit(2, 1, 3), 49);
         assert_eq!(light_cone_limit(3, 1, 2), 125);
+        // Huge parameters saturate instead of wrapping to a small cone.
+        assert_eq!(
+            light_cone_limit(1, usize::MAX, 2),
+            4 * usize::MAX as u128 + 1
+        );
+        assert_eq!(light_cone_limit(1 << 32, 1, 1), u128::MAX);
+        assert_eq!(light_cone_limit(81, 1, 1), u128::MAX);
     }
 
     #[test]

@@ -620,6 +620,112 @@ cargo run --release -- primecols --w 14 --k 10000 --rows 90  # 2D machinery, the
 * Folding the columns into the plane (each row a band of \(h\) grid rows) should give the same in
   2D, but that has not been built.
 
+## The next prime in constant time?
+
+The automaton above takes one step per prime, but only because its hidden machinery has been
+working ahead since step 0. Could a rule start from the prime alone, $p$ lit cells, and reach
+exactly the next prime in a fixed number of steps $k$, the same for every $p$? No, in any
+dimension (`src/constant_time.rs`, command `constant-time`).
+
+**Model.** The lattice $\mathbb{Z}^d$ for any $d$ (the argument is the same on the Cayley graph of
+any finitely generated group, such as the hexagonal grid); any states, even infinitely many like
+the 64-bit cells above; a local rule of radius $r$; any choice of the states that count as lit;
+and a layout: for every prime $p$ a configuration $c_p$ with exactly $p$ lit cells and any helper
+cells. $F(c)$ is the number of lit cells $k$ steps after $c$.
+
+**Light cone.** After $k$ steps a cell depends only on the cells within distance $rk$. So if two
+configurations differ in $D$ cells, up to a translation, their lit counts $k$ steps later differ
+by at most $MD$, where $M$ is the number of cells within distance $rk$: at most $(2rk+1)^d$ on
+$\mathbb{Z}^d$.
+
+**Theorem 1 (layouts that change little).** Suppose the layouts of consecutive primes $q<p$
+differ, up to a translation, in at most $A(p-q)+B\ln p$ cells, for fixed $A$ and $B$. Then for no
+$k$ is $F(c_p)$ the next prime for every prime $p$, nor even for every prime beyond some point.
+
+Every layout that grows by adding cells has $A=1$, $B=0$: a line, the staircase above, a spiral,
+any fixed filling order, also with any fixed helper pattern, finite or infinite, added to all of
+them. Helper cells that spell out $p$ in any base add $B\ln p$.
+
+*Proof.* Write $d_n=p_{n+1}-p_n$. The light cone, applied to the layouts of $p_n$ and $p_{n+1}$,
+gives
+
+$$d_{n+1}=F(c_{p_{n+1}})-F(c_{p_n})\le M\,(A\,d_n+B\ln p_{n+1}).$$
+
+Pintz ([On the ratio of consecutive gaps between primes](https://arxiv.org/abs/1406.2658),
+Theorem 1 with $k=1$) proved that for every large $N$ some $n\in[N,2N]$ has
+$d_{n+1}>c\,L(N)\ln N\,d_n$, where $c>0$ and $L(N)=\ln\ln N\,\ln\ln\ln\ln N/(\ln\ln\ln N)^2$ grows
+without bound. This settled a question Erdős asked in 1955. For those $n$, $\ln p_{n+1}\le 2\ln N$
+and $d_n\ge1$, so the right-hand side is at most $M(A+2B)\,d_n\ln N$, which is less than
+$d_{n+1}$ as soon as $c\,L(N)>M(A+2B)$. $\square$
+
+**Theorem 2 (every layout).** A rule that must accept every arrangement of $p$ lit cells with
+nothing else fails at $p=2$. Two lit cells more than $2rk$ apart evolve independently, and empty
+space produces no lit cells (or the count would be infinite), so they end with twice the count of
+one lit cell: an even number, never 3. (The same argument as the pair reduction in
+`src/bounds.rs`.)
+
+**Other layouts.** Let $f(P)=1$ when a cell whose radius-$rk$ patch of the input is $P$ is lit
+$k$ steps later. Then $F(c)=\sum_P f(P)\,N_P(c)$, where $N_P(c)$ is the number of cells of $c$
+whose patch is $P$. So in $k$ steps a rule can only output a fixed weighted census of the small
+patches of its input. Theorems 1 and 2 show that this census cannot be the next prime for layouts
+that grow, nor for rules that must accept every arrangement. A layout that rearranges its cells
+wholesale between consecutive primes is not covered by them. For its census to give the next
+prime, the layout must already encode the gap to the next prime, so the layout would be doing the
+work.
+
+**Explicit refutations.** For a given rule size the primes can be named. Take layouts in which the
+configuration of each prime is that of the previous prime plus the new lit cells ($A=1$, $B=0$ in
+Theorem 1; a fixed helper pattern is allowed). Three consecutive primes $p<q<r$ rule out every
+rule whose light cone has $M$ cells when $r-q>M(q-p)$: laying out $q$ instead of $p$ adds $q-p$
+cells, so the output can grow by at most $M(q-p)$, but it must grow from $q$ to $r$. The first
+such triple is the first record of $(r-q)/(q-p)$ above $M$. Records up to $10^{11}$ (all
+4,118,054,813 primes, 23 seconds), first refutation for each rule size, radius 1:
+
+| rule | light cone $M$ | first refuting primes $p, q, r$ | output can grow by at most | must grow by |
+|---|---|---|---|---|
+| 1D, 1 step | 3 | 109, 113, 127 | 12 | 14 |
+| 2D, 1 step | 9 | 1,667, 1,669, 1,693 | 18 | 24 |
+| 2D, 2 steps | 25 | 25,469, 25,471, 25,523 | 50 | 52 |
+| 3D, 1 step | 27 | 79,697, 79,699, 79,757 | 54 | 58 |
+| 2D, 3 steps | 49 | 838,247, 838,249, 838,349 | 98 | 100 |
+| 4D, 1 step | 81 | 42,082,301, 42,082,303, 42,082,471 | 162 | 168 |
+| 3D, 2 steps | 125 | 2,287,052,429, 2,287,052,431, 2,287,052,689 | 250 | 258 |
+| 2D, 6 steps | 169 | 32,331,294,911, 32,331,294,913, 32,331,295,273 | 338 | 360 |
+| 1D, 99 steps | 199 | 94,746,870,539, 94,746,870,541, 94,746,870,943 | 398 | 402 |
+
+So, for such layouts, the primes up to $10^{11}$ alone rule out every radius-1 rule that finishes
+within 99 steps in 1D, 6 in 2D, 2 in 3D and 1 in 4D; Theorem 1 covers every other size. Up to $10^{11}$, every record
+apart from (2, 3, 5) and (109, 113, 127) is a pair of twin primes followed by a long gap. Whether
+that pattern goes on forever is open (it would need infinitely many twin primes); Theorem 1 does
+not depend on it.
+
+How the records were checked:
+
+* the chunked sieve gives the same records and prime counts as a plain sieve, for chunk sizes
+  down to 2 numbers (chunks holding no prime or one prime test the stitching);
+* the prime counts up to $10^7$, $10^9$ and $10^{11}$ (664,579, 50,847,534 and 4,118,054,813)
+  match the known values;
+* every record triple is confirmed as three consecutive primes by a deterministic Miller–Rabin
+  test, independent of the sieve;
+* the twin-prime records match OEIS [A329161](https://oeis.org/A329161) (the gaps, 37 terms) and
+  [A329160](https://oeis.org/A329160) (their positions, 32 terms). A329161's next terms, 204 and
+  207, lie beyond $10^{11}$.
+
+**What is possible instead.**
+
+* One step per prime, once the automaton has been running since step 0: the automaton above. The
+  work for each prime is done in advance, not saved.
+* From a bare prime, the time must grow with $p$. A rule that works for every prime up to $x$
+  needs $(2rk+1)^d$ to be at least the largest ratio $d_{n+1}/d_n$ up to $x$, which by Pintz's
+  theorem eventually exceeds $\ln x$. This only rules out constant time; it says nothing about
+  how fast a rule that starts from a bare prime could be.
+
+```
+cargo run --release -- constant-time                                   # 2D, one step: 1,667, 1,669, 1,693
+cargo run --release -- constant-time --dim 3 --steps 2 --limit 3000000000
+cargo run --release -- constant-time --records --limit 100000000000    # every record up to 10^11
+```
+
 ## Constructive route
 
 `src/construct.rs` implements the part of the population construction that is independent of
@@ -900,6 +1006,13 @@ automaton whose count is the next prime"):
   with small digits and certified for every row with 64-bit digits.
 * In one dimension no rule can do it: a 1D pattern grows by a bounded number of cells per step,
   while \(p_t\) grows like \(t\ln t\).
+
+No rule, in any dimension, can start from a prime alone, laid out as the previous prime's layout
+plus the new lit cells (with any fixed helper pattern), and reach the next prime in a fixed number
+of steps (see "The next prime in constant time?"): the light cone bounds how much the output can
+change when the input grows, and the ratio of consecutive prime gaps is unbounded (Pintz). The
+automaton above gets one step per prime only by working ahead. For such layouts, explicit primes
+up to $10^{11}$ rule out every radius-1 rule finishing within 6 steps in 2D, 2 in 3D and 1 in 4D.
 
 The epoch construction described under "Constructive route" is an earlier, unfinished attempt at
 a two-state version; it remains open until the local epoch factory, gap-to-mask transport, arena
