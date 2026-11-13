@@ -415,6 +415,23 @@ cells further apart always end up with an even count). Where things stand:
 `cargo run --release -- onoff --rule <128 hex digits> --seed "0,0;1,0"` checks any candidate rule
 against the first 10,000 primes. Passing would still not be proof that it works forever.
 
+### Even with a few dozen states per cell
+
+Allowing each cell a few dozen states, with only some of them counting as lit, doesn't remove the
+main difficulty. That version is open too.
+
+- **The rule has to test more and more numbers per step.** By step t it must have worked out the
+  next prime, about t·ln t, so it has to settle about ln t numbers per step, and that keeps
+  growing.
+- **Known prime-generating automata are too slow.** The smallest ones (8 to 11 states) settle one
+  number per step: a special cell lights up at step n exactly when n is prime.
+- **Running several in parallel isn't simple.** Each parallel lane needs its own timing for every
+  prime, the machinery for different primes must not get in each other's way, and the number of
+  lanes has to grow forever.
+- **Our two sketched designs are too big.** Both would need well over a hundred states (see the
+  [technical notes](docs/technical-notes.md)), and a literature search found no known
+  construction.
+
 ## Run it yourself
 
 You need Rust (`cargo`).

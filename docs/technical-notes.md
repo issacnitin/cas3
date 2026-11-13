@@ -932,6 +932,92 @@ cargo run --release -- onoff --search --terms 120 --time-limit 300              
 cargo run --release -- onoff --search --seed "-1,-1;1,1" --terms 120 --time-limit 1200
 ```
 
+## A few dozen states, hidden helpers allowed
+
+The relaxed version keeps every condition of the strict goal except on/off. The rule is 2D,
+reads the cell and its 8 neighbours, and an all-quiet neighbourhood stays quiet. It starts with 2
+lit cells and has exactly $p_{t+1}$ lit cells after step $t$, forever. But each cell may have a
+few dozen states, and only some of them count as lit; the rest are hidden helpers. Success would
+again be a rule that matches the first 10,000 primes when run, plus a proof. This is open too: we
+know of no such rule, and the literature search below found none.
+
+**Why hidden helpers don't make it easy.** By step $t$ the rule must have worked out
+$p_{t+1}\approx t\ln t$. So within $t$ steps it has to settle whether each of about $t\ln t$
+numbers is prime: on average $\ln t$ numbers per step, a rate that grows without bound.
+
+The small prime generators in the literature settle one number per step. A special cell is marked
+at step $n$ exactly when $n$ is prime (Fischer 1965; Korec, 11 and 9 states; Miyamoto and Umeo, 8
+states). Run like that, the count would fall behind the primes within a few steps. The 2D and 3D
+automata above keep up by testing every number in its own cell with large hidden numbers, which a
+few dozen states cannot hold.
+
+**What makes a faster sieve hard.** Those generators give each prime $q$ a signal that repeats
+every $q$ steps and fires on the multiples of $q$.
+
+* *Copies of these signals don't add speed.* A processing point handles number $s$ at step $s$.
+  A copy of each prime's signal delayed by $d$ steps (the same $d$ for every prime) fires exactly
+  when $q \mid s-d$. So the copy handles the same numbers $d$ steps later.
+  - Lanes that handle different numbers at the same time need a different phase for every prime;
+    for example, lane $\rho$ of the residues mod $R$ needs $-\rho R^{-1} \bmod q$.
+  - That is separate work for every prime in every lane. The phase arithmetic itself can be done
+    with a few signal speeds (multiplying a phase by a constant, and halving it modulo $q$ with
+    the help of a reference signal and a half-speed return), so it is not the obstacle on its own.
+* *Every prime's machinery shares the plane.* With finitely many kinds of signal, the probes and
+  catches of different primes meet and can't be told apart.
+  - So each prime needs its own region, as Fischer's sieve gives each prime its own stretch of the
+    line.
+  - Its results then have to reach the shared numbers through marks that land on the right cell
+    by timing alone.
+* *No layout makes every prime easy.* Suppose a layout $f$ put all multiples of each prime $q$ on
+  a single line $L_q$. Then for primes $p\ne q$ the two cells $f(pq)$ and $f(2pq)$ lie on both
+  $L_p$ and $L_q$, so the lines coincide. All numbers above 1 then lie on one line, where most of
+  them are too far away to reach in time (the 1D case).
+* *The parallelism has to keep growing.* With a front that creates numbers at half speed, step $t$
+  needs about $2\ln t$ lanes. So lanes must keep being added, each needing every prime's phase.
+
+**Two designs that look possible (neither built).**
+
+1. *Per-prime routers.*
+   - Numbers sit in a strip $R$ cells tall: $n$ at column $\lfloor n/R\rfloor$, row $n \bmod R$. A
+     front moving right at half speed creates the columns.
+   - Each prime $q\le\sqrt{n}$ gets a private slab that moves with the front, holding:
+     - a signal whose period is about $2\lfloor q/R\rfloor$;
+     - a row pointer that advances by $q \bmod R$, with wrap-around and carry.
+   - Each firing sends a mark left along the pointer's row that reaches the front exactly when it
+     creates that multiple.
+   - Growth means starting taller strips from scratch and switching the display over to them.
+2. *Independent testers* (suggested in review).
+   - Build a hidden grid of tiles, one per number up to a bound $N$ for the coming epoch. Each tile
+     holds its number in binary and does trial division on its own.
+   - Rank the primes with row and column prefix scans, and send the gaps, in order, to a histogram
+     display (gap $t$ armed as a column at $x=\lfloor t/2\rfloor$ and revealed by a half-speed
+     front).
+   - A tile near $N$ needs about $\sqrt N$ times a power of $\log N$ steps, far fewer than the
+     $N/\ln N$ available.
+
+Both use a fixed, finite set of states, so a rule exists in principle. But each needs many separate
+mechanisms with exact timing:
+
+- fronts, slabs or tiles, binary arithmetic, prefix scans, transport and the display;
+- a start from two lit cells with every count right from step 0;
+- unbounded growth.
+
+All of it then needs a proof. Our estimate for either design is well over a hundred states, and
+we see no way down to a few dozen.
+
+**Literature.** We searched four areas:
+
+- the prime-generator papers: Fischer, Korec, Umeo and coauthors, and the 188 works citing Fischer;
+- growth-rate constructions in Conway's Life ($t\log t$, $t^{3/2}$, …);
+- signal-constructibility results (Mazoyer and Terrier; Dubacq and Terrier in 2D);
+- parallel sieving hardware (TWINKLE, TWIRL).
+
+None gives this construction or implies it.
+
+- The prime generators all settle one number per step.
+- The Life constructions control growth rates, not exact counts.
+- The fast hardware sieves keep each prime's phase as a binary counter.
+
 ## Constructive route
 
 `src/construct.rs` implements the part of the population construction that is independent of
@@ -1235,3 +1321,8 @@ goal") is open. The best complete rule found matches 76 primes by memorising: it
 the 512 entries and has 398 cells instead of 389 at step 76. A provable rule would need machinery
 whose population is exactly predictable at every step. The constructive route gets that only by
 reading further than the 8 neighbours.
+
+Allowing a few dozen states with hidden helpers (see "A few dozen states, hidden helpers
+allowed") is open as well. The rule would need a sieve that settles about $\ln t$ new numbers per
+step, a rate that keeps growing. Every known small prime generator settles one number per step, and
+no design with that few states is known.
